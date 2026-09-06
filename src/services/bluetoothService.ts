@@ -22,69 +22,61 @@ class BluetoothService {
   private server: any = null;
   private heartRateChar: any = null;
   private onVitalsUpdate: VitalsUpdateCallback | null = null;
+  private onDisconnectCallback: (() => void) | null = null;
 
-  /**
-   * Check if Web Bluetooth is supported in the current browser
-   */
   public isSupported(): boolean {
     return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
   }
 
-  /**
-   * Request user permission and pair with standard Bluetooth GATT Smartwatch / Heart Rate sensor
-   */
-  public async connect(onUpdate: VitalsUpdateCallback): Promise<BLEDeviceStatus> {
+  public async connect(
+    onUpdate: VitalsUpdateCallback,
+    onDisconnect?: () => void
+  ): Promise<BLEDeviceStatus> {
     this.onVitalsUpdate = onUpdate;
+    this.onDisconnectCallback = onDisconnect || null;
 
     if (!this.isSupported()) {
       return {
         isConnected: false,
-        errorMessage: 'Web Bluetooth API is not supported in this browser. Please use Google Chrome or Microsoft Edge on Android, Windows, Mac, or ChromeOS.'
+        errorMessage: 'Web Bluetooth API is not supported in this browser. Please use Chrome or Edge on Android / Windows / Mac.'
       };
     }
 
     try {
-      // Request standard Bluetooth SIG GATT services: Heart Rate (0x180D) & Battery (0x180F)
       const nav = navigator as any;
       this.device = await nav.bluetooth.requestDevice({
-        filters: [
-          { services: ['heart_rate'] }
-        ],
-        optionalServices: ['battery_service']
+        filters: [{ services: ['heart_rate'] }],
+        optionalServices: ['battery_service', 0x1822] // Standard pulse oximeter GATT
       });
 
       if (!this.device) {
-        throw new Error('Device selection was cancelled by the user.');
+        throw new Error('Device selection was cancelled.');
       }
 
       this.device.addEventListener('gattserverdisconnected', this.handleDisconnect);
-
-      // Connect to GATT Server
       this.server = await this.device.gatt.connect();
 
-      // 1. Discover Heart Rate Service (0x180D)
+      // Discover Heart Rate Service (0x180D)
       const hrService = await this.server.getPrimaryService('heart_rate');
       this.heartRateChar = await hrService.getCharacteristic('heart_rate_measurement');
-
-      // Start listening to live notification stream
       await this.heartRateChar.startNotifications();
       this.heartRateChar.addEventListener('characteristicvaluechanged', this.handleHeartRateData);
 
-      // 2. Try to read Battery Service (0x180F) if available
+      // Read battery level if available
       let batteryLevel: number | undefined;
       try {
         const batteryService = await this.server.getPrimaryService('battery_service');
         const batteryChar = await batteryService.getCharacteristic('battery_level');
         const batteryVal = await batteryChar.readValue();
         batteryLevel = batteryVal.getUint8(0);
-      } catch (e) {
+      } catch {
         // Battery service optional
       }
 
       return {
         isConnected: true,
-        deviceName: this.device.name || 'Bluetooth Heart Rate Monitor',
-        batteryLevel: batteryLevel ?? 92
+        deviceName: this.device.name || 'Bluetooth BLE Smartwatch',
+        batteryLevel: batteryLevel
       };
     } catch (err: any) {
       console.warn('Bluetooth connection error:', err);
@@ -95,21 +87,16 @@ class BluetoothService {
     }
   }
 
-  /**
-   * Parse standard Bluetooth SIG 0x2A37 Heart Rate Measurement format
-   * Specification: https://www.bluetooth.com/specifications/specs/heart-rate-service-1-0/
-   */
   private handleHeartRateData = (event: any) => {
     const value = event.target.value;
     if (!value) return;
 
-    // Bit 0 of Flags determines 8-bit vs 16-bit BPM format
     const flags = value.getUint8(0);
     const is16Bit = (flags & 0x01) === 1;
 
     let heartRate = 0;
     if (is16Bit) {
-      heartRate = value.getUint16(1, /* littleEndian = */ true);
+      heartRate = value.getUint16(1, true);
     } else {
       heartRate = value.getUint8(1);
     }
@@ -119,9 +106,6 @@ class BluetoothService {
     }
   };
 
-  /**
-   * Disconnect from current wearable
-   */
   public disconnect(): void {
     try {
       if (this.heartRateChar) {
@@ -140,10 +124,11 @@ class BluetoothService {
 
   private handleDisconnect = () => {
     console.log('Bluetooth device disconnected');
-    if (this.onVitalsUpdate) {
-      // notify disconnect if needed
+    if (this.onDisconnectCallback) {
+      this.onDisconnectCallback();
     }
   };
 }
 
 export const bluetoothService = new BluetoothService();
+

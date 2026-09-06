@@ -20,24 +20,297 @@ import {
 import { useApp } from '../../context/AppContext';
 
 const SAMPLE_CITIES = [
+  // Telangana
+  'Hyderabad, Telangana',
   'Gachibowli, Hyderabad, Telangana',
   'Banjara Hills, Hyderabad, Telangana',
-  'Mumbai, Maharashtra',
-  'Andheri, Mumbai, Maharashtra',
-  'Delhi, NCT of Delhi',
-  'Connaught Place, Delhi',
-  'Bengaluru, Karnataka',
-  'Whitefield, Bengaluru, Karnataka',
-  'Chennai, Tamil Nadu',
-  'Kolkata, West Bengal',
-  'Pune, Maharashtra',
-  'Ahmedabad, Gujarat',
-  'Jaipur, Rajasthan',
-  'Lucknow, Uttar Pradesh',
-  'Bhopal, Madhya Pradesh',
-  'Chandigarh, Punjab',
+  'Secunderabad, Telangana',
+  'Warangal, Telangana',
+  'Hanamkonda, Telangana',
+  'Karimnagar, Telangana',
+  'Nizamabad, Telangana',
+  'Khammam, Telangana',
+  'Ramagundam, Telangana',
+  'Mahbubnagar, Telangana',
+  'Nalgonda, Telangana',
+  'Adilabad, Telangana',
+  'Suryapet, Telangana',
+  'Miryalaguda, Telangana',
+  'Jagtial, Telangana',
+  'Mancherial, Telangana',
+  'Siddipet, Telangana',
+  'Kamareddy, Telangana',
+  'Kothagudem, Telangana',
+
+  // Andhra Pradesh
+  'Vijayawada, Andhra Pradesh',
   'Visakhapatnam, Andhra Pradesh',
+  'Guntur, Andhra Pradesh',
+  'Nellore, Andhra Pradesh',
+  'Kurnool, Andhra Pradesh',
+  'Tirupati, Andhra Pradesh',
+  'Rajahmundry, Andhra Pradesh',
+  'Kakinada, Andhra Pradesh',
+  'Kadapa, Andhra Pradesh',
+  'Anantapur, Andhra Pradesh',
+  'Eluru, Andhra Pradesh',
+  'Ongole, Andhra Pradesh',
+  'Machilipatnam, Andhra Pradesh',
+  'Srikakulam, Andhra Pradesh',
+  'Vizianagaram, Andhra Pradesh',
+  'Chittoor, Andhra Pradesh',
+  'Nandyal, Andhra Pradesh',
+  'Tenali, Andhra Pradesh',
+  'Narasaraopet, Andhra Pradesh',
+  'Proddatur, Andhra Pradesh',
+
+  // Karnataka
+  'Bengaluru, Karnataka',
+  'Mysuru, Karnataka',
+  'Mangaluru, Karnataka',
+  'Hubballi, Karnataka',
+  'Dharwad, Karnataka',
+  'Belagavi, Karnataka',
+  'Kalaburagi, Karnataka',
+  'Davangere, Karnataka',
+  'Ballari, Karnataka',
+  'Shivamogga, Karnataka',
+  'Tumakuru, Karnataka',
+  'Udupi, Karnataka',
+  'Hassan, Karnataka',
+  'Mandya, Karnataka',
+  'Raichur, Karnataka',
+  'Bidar, Karnataka',
+  'Vijayapura, Karnataka',
+  'Chitradurga, Karnataka',
+  'Kolar, Karnataka',
+  'Chikkamagaluru, Karnataka',
+
+  // Tamil Nadu
+  'Chennai, Tamil Nadu',
+  'Coimbatore, Tamil Nadu',
+  'Madurai, Tamil Nadu',
+  'Tiruchirappalli, Tamil Nadu',
+  'Salem, Tamil Nadu',
+  'Tiruppur, Tamil Nadu',
+  'Erode, Tamil Nadu',
+  'Vellore, Tamil Nadu',
+  'Thoothukudi, Tamil Nadu',
+  'Dindigul, Tamil Nadu',
+  'Thanjavur, Tamil Nadu',
+  'Tirunelveli, Tamil Nadu',
+  'Nagercoil, Tamil Nadu',
+  'Kanchipuram, Tamil Nadu',
+  'Cuddalore, Tamil Nadu',
+  'Karur, Tamil Nadu',
+  'Namakkal, Tamil Nadu',
+  'Hosur, Tamil Nadu',
+  'Kumbakonam, Tamil Nadu',
+  'Ooty, Tamil Nadu',
+
+  // Maharashtra
+  'Mumbai, Maharashtra',
+  'Pune, Maharashtra',
+  'Nagpur, Maharashtra',
+  'Nashik, Maharashtra',
+  'Aurangabad, Maharashtra',
+  'Thane, Maharashtra',
+  'Navi Mumbai, Maharashtra',
+  'Kolhapur, Maharashtra',
+  'Solapur, Maharashtra',
+  'Amravati, Maharashtra',
+  'Nanded, Maharashtra',
+  'Satara, Maharashtra',
+  'Sangli, Maharashtra',
+  'Jalgaon, Maharashtra',
+  'Akola, Maharashtra',
+  'Latur, Maharashtra',
+  'Ahmednagar, Maharashtra',
+  'Chandrapur, Maharashtra',
+  'Ratnagiri, Maharashtra',
+  'Wardha, Maharashtra',
+
+  // Delhi NCR
+  'Delhi, NCT of Delhi',
+  'New Delhi, NCT of Delhi',
+  'Connaught Place, Delhi',
+  'Gurugram, Haryana',
+  'Noida, Uttar Pradesh',
+  'Greater Noida, Uttar Pradesh',
+  'Ghaziabad, Uttar Pradesh',
+  'Faridabad, Haryana',
+
+  // Uttar Pradesh
+  'Lucknow, Uttar Pradesh',
+  'Kanpur, Uttar Pradesh',
+  'Agra, Uttar Pradesh',
+  'Varanasi, Uttar Pradesh',
+  'Prayagraj, Uttar Pradesh',
+  'Meerut, Uttar Pradesh',
+  'Bareilly, Uttar Pradesh',
+  'Aligarh, Uttar Pradesh',
+  'Moradabad, Uttar Pradesh',
+  'Saharanpur, Uttar Pradesh',
+  'Gorakhpur, Uttar Pradesh',
+  'Mathura, Uttar Pradesh',
+  'Ayodhya, Uttar Pradesh',
+  'Jhansi, Uttar Pradesh',
+  'Firozabad, Uttar Pradesh',
+  'Muzaffarnagar, Uttar Pradesh',
+
+  // West Bengal
+  'Kolkata, West Bengal',
+  'Howrah, West Bengal',
+  'Durgapur, West Bengal',
+  'Asansol, West Bengal',
+  'Siliguri, West Bengal',
+  'Bardhaman, West Bengal',
+  'Kharagpur, West Bengal',
+  'Darjeeling, West Bengal',
+
+  // Gujarat
+  'Ahmedabad, Gujarat',
+  'Surat, Gujarat',
+  'Vadodara, Gujarat',
+  'Rajkot, Gujarat',
+  'Gandhinagar, Gujarat',
+  'Bhavnagar, Gujarat',
+  'Jamnagar, Gujarat',
+  'Junagadh, Gujarat',
+  'Anand, Gujarat',
+  'Bharuch, Gujarat',
+  'Navsari, Gujarat',
+  'Vapi, Gujarat',
+
+  // Rajasthan
+  'Jaipur, Rajasthan',
+  'Jodhpur, Rajasthan',
+  'Udaipur, Rajasthan',
+  'Kota, Rajasthan',
+  'Ajmer, Rajasthan',
+  'Bikaner, Rajasthan',
+  'Alwar, Rajasthan',
+  'Bharatpur, Rajasthan',
+  'Sikar, Rajasthan',
+  'Sri Ganganagar, Rajasthan',
+
+  // Kerala
+  'Thiruvananthapuram, Kerala',
   'Kochi, Kerala',
+  'Kozhikode, Kerala',
+  'Thrissur, Kerala',
+  'Kollam, Kerala',
+  'Kannur, Kerala',
+  'Alappuzha, Kerala',
+  'Palakkad, Kerala',
+  'Kottayam, Kerala',
+  'Malappuram, Kerala',
+  'Kasaragod, Kerala',
+
+  // Odisha
+  'Bhubaneswar, Odisha',
+  'Cuttack, Odisha',
+  'Rourkela, Odisha',
+  'Berhampur, Odisha',
+  'Sambalpur, Odisha',
+  'Puri, Odisha',
+  'Balasore, Odisha',
+  'Baripada, Odisha',
+
+  // Madhya Pradesh
+  'Bhopal, Madhya Pradesh',
+  'Indore, Madhya Pradesh',
+  'Jabalpur, Madhya Pradesh',
+  'Gwalior, Madhya Pradesh',
+  'Ujjain, Madhya Pradesh',
+  'Sagar, Madhya Pradesh',
+  'Rewa, Madhya Pradesh',
+  'Satna, Madhya Pradesh',
+
+  // Bihar
+  'Patna, Bihar',
+  'Gaya, Bihar',
+  'Muzaffarpur, Bihar',
+  'Bhagalpur, Bihar',
+  'Darbhanga, Bihar',
+  'Purnia, Bihar',
+  'Ara, Bihar',
+  'Begusarai, Bihar',
+
+  // Punjab
+  'Amritsar, Punjab',
+  'Ludhiana, Punjab',
+  'Jalandhar, Punjab',
+  'Patiala, Punjab',
+  'Bathinda, Punjab',
+  'Mohali, Punjab',
+  'Pathankot, Punjab',
+
+  // Haryana
+  'Chandigarh, Chandigarh',
+  'Panipat, Haryana',
+  'Ambala, Haryana',
+  'Hisar, Haryana',
+  'Rohtak, Haryana',
+  'Karnal, Haryana',
+  'Sonipat, Haryana',
+
+  // Assam
+  'Guwahati, Assam',
+  'Dibrugarh, Assam',
+  'Silchar, Assam',
+  'Jorhat, Assam',
+  'Tezpur, Assam',
+
+  // Jharkhand
+  'Ranchi, Jharkhand',
+  'Jamshedpur, Jharkhand',
+  'Dhanbad, Jharkhand',
+  'Bokaro, Jharkhand',
+  'Deoghar, Jharkhand',
+
+  // Chhattisgarh
+  'Raipur, Chhattisgarh',
+  'Bhilai, Chhattisgarh',
+  'Bilaspur, Chhattisgarh',
+  'Korba, Chhattisgarh',
+  'Durg, Chhattisgarh',
+
+  // Uttarakhand
+  'Dehradun, Uttarakhand',
+  'Haridwar, Uttarakhand',
+  'Rishikesh, Uttarakhand',
+  'Haldwani, Uttarakhand',
+  'Nainital, Uttarakhand',
+
+  // Himachal Pradesh
+  'Shimla, Himachal Pradesh',
+  'Dharamshala, Himachal Pradesh',
+  'Manali, Himachal Pradesh',
+  'Solan, Himachal Pradesh',
+  'Mandi, Himachal Pradesh',
+
+  // Goa
+  'Panaji, Goa',
+  'Margao, Goa',
+  'Vasco da Gama, Goa',
+
+  // Jammu & Kashmir
+  'Srinagar, Jammu and Kashmir',
+  'Jammu, Jammu and Kashmir',
+  'Anantnag, Jammu and Kashmir',
+  'Baramulla, Jammu and Kashmir',
+
+  // Other major locations
+  'Puducherry, Puducherry',
+  'Port Blair, Andaman and Nicobar Islands',
+  'Shillong, Meghalaya',
+  'Imphal, Manipur',
+  'Aizawl, Mizoram',
+  'Kohima, Nagaland',
+  'Agartala, Tripura',
+  'Gangtok, Sikkim',
+  'Itanagar, Arunachal Pradesh'
 ];
 
 export const EnvironmentDashboard: React.FC = () => {
@@ -158,7 +431,7 @@ export const EnvironmentDashboard: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      
+
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -233,11 +506,10 @@ export const EnvironmentDashboard: React.FC = () => {
                 <li key={city}>
                   <button
                     onClick={() => handleSelectCity(city)}
-                    className={`w-full flex items-center gap-2.5 px-5 py-2.5 text-left text-xs transition-colors ${
-                      displayRegion === city
-                        ? 'bg-sky-600/20 text-sky-300 font-bold'
-                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                    }`}
+                    className={`w-full flex items-center gap-2.5 px-5 py-2.5 text-left text-xs transition-colors ${displayRegion === city
+                      ? 'bg-sky-600/20 text-sky-300 font-bold'
+                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                      }`}
                   >
                     <MapPin className="w-3 h-3 shrink-0 text-slate-500" />
                     {city}
@@ -274,11 +546,10 @@ export const EnvironmentDashboard: React.FC = () => {
       {disasterAlerts.map((alert) => (
         <div
           key={alert.id}
-          className={`p-6 rounded-3xl border-2 ${
-            alert.severity === 'RED_WARNING'
-              ? 'bg-gradient-to-r from-red-950/60 via-slate-900 to-red-950/60 border-red-500/80 shadow-2xl shadow-red-950/50'
-              : 'bg-gradient-to-r from-amber-950/60 via-slate-900 to-amber-950/60 border-amber-500/80'
-          }`}
+          className={`p-6 rounded-3xl border-2 ${alert.severity === 'RED_WARNING'
+            ? 'bg-gradient-to-r from-red-950/60 via-slate-900 to-red-950/60 border-red-500/80 shadow-2xl shadow-red-950/50'
+            : 'bg-gradient-to-r from-amber-950/60 via-slate-900 to-amber-950/60 border-amber-500/80'
+            }`}
         >
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
             <div className="flex items-start gap-4">

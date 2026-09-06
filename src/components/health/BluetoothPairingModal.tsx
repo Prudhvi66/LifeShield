@@ -17,7 +17,7 @@ interface BluetoothPairingModalProps {
 }
 
 export const BluetoothPairingModal: React.FC<BluetoothPairingModalProps> = ({ isOpen, onClose }) => {
-  const { updateUser } = useApp();
+  const { updateUser, updateLiveVitals } = useApp();
   const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState<BLEDeviceStatus | null>(null);
   const [activeGuideTab, setActiveGuideTab] = useState<'garmin' | 'apple' | 'wearos' | 'generic'>('generic');
@@ -34,6 +34,11 @@ export const BluetoothPairingModal: React.FC<BluetoothPairingModalProps> = ({ is
       // Live heart rate callback directly updating user vitals
       if (liveData.heartRate) {
         setStatus(prev => prev ? { ...prev, lastHeartRate: liveData.heartRate } : null);
+        updateLiveVitals({
+          heartRate: liveData.heartRate,
+          source: 'ble',
+          deviceName: result.deviceName || 'Bluetooth Sensor',
+        });
       }
     });
 
@@ -44,7 +49,7 @@ export const BluetoothPairingModal: React.FC<BluetoothPairingModalProps> = ({ is
       updateUser(prev => ({
         ...prev,
         wearableConnected: {
-          deviceName: result.deviceName,
+          deviceName: result.deviceName || 'Bluetooth BLE Smartwatch',
           isConnected: true,
           batteryPercent: result.batteryLevel || 90,
           protocol: 'BLE'
@@ -52,6 +57,7 @@ export const BluetoothPairingModal: React.FC<BluetoothPairingModalProps> = ({ is
       }));
     }
   };
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in">

@@ -4,9 +4,12 @@ import {
   Heart,
   Save,
   CheckCircle2,
-  Sparkles
+  Sparkles,
+  Loader2,
+  Cloud
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { apiClient } from '../../services/apiClient';
 
 export const ProfileSettings: React.FC = () => {
   const { user, updateUser, t } = useApp();
@@ -21,10 +24,15 @@ export const ProfileSettings: React.FC = () => {
   const [restingHrBaseline, setRestingHrBaseline] = useState(user.baseline.restingHeartRate);
   const [spO2MinBaseline, setSpO2MinBaseline] = useState(user.baseline.normalSpO2Min);
   
+  const [isSaving, setIsSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [backendSynced, setBackendSynced] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSaving(true);
+    setSavedSuccess(false);
+
     updateUser(prev => ({
       ...prev,
       fullName,
@@ -41,8 +49,30 @@ export const ProfileSettings: React.FC = () => {
       }
     }));
 
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
+    try {
+      if (apiClient.getToken()) {
+        await apiClient.profile.update({
+          full_name: fullName,
+          age: Number(age),
+          blood_group: bloodGroup,
+          phone_number: phone,
+        });
+        await apiClient.profile.updateBaseline({
+          resting_heart_rate: Number(restingHrBaseline),
+          normal_spo2_min: Number(spO2MinBaseline),
+        });
+        setBackendSynced(true);
+      } else {
+        setBackendSynced(false);
+      }
+    } catch (err) {
+      console.warn('Backend profile sync skipped (no active auth session):', err);
+      setBackendSynced(false);
+    } finally {
+      setIsSaving(false);
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 4000);
+    }
   };
 
   return (
@@ -61,9 +91,17 @@ export const ProfileSettings: React.FC = () => {
       </div>
 
       {savedSuccess && (
-        <div className="p-4 bg-emerald-950/80 border border-emerald-500/50 rounded-2xl text-xs text-emerald-300 flex items-center gap-2 animate-in fade-in">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-          <span>Profile & Personalized Baseline configurations updated successfully!</span>
+        <div className="p-4 bg-emerald-950/80 border border-emerald-500/50 rounded-2xl text-xs text-emerald-300 flex items-center justify-between gap-2 animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+            <span>Profile & Personalized Baseline configurations updated successfully!</span>
+          </div>
+          {backendSynced && (
+            <span className="flex items-center gap-1 text-[11px] bg-emerald-900/60 px-2 py-0.5 rounded text-emerald-200 border border-emerald-700/50">
+              <Cloud className="w-3 h-3" />
+              Synced to Cloud
+            </span>
+          )}
         </div>
       )}
 
@@ -219,10 +257,11 @@ export const ProfileSettings: React.FC = () => {
         <div className="flex justify-end">
           <button
             type="submit"
-            className="flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white font-bold py-3 px-6 rounded-xl text-xs shadow-lg shadow-sky-950/50 transition-all active:scale-95 cursor-pointer"
+            disabled={isSaving}
+            className="flex items-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold py-3 px-6 rounded-xl text-xs shadow-lg shadow-sky-950/50 transition-all active:scale-95 cursor-pointer"
           >
-            <Save className="w-4 h-4" />
-            <span>Save Profile & Baseline</span>
+            {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span>{isSaving ? 'Saving...' : 'Save Profile & Baseline'}</span>
           </button>
         </div>
       </form>

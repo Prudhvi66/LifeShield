@@ -1,0 +1,1 @@
+"""LifeShield API package."""

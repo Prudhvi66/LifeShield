@@ -205,9 +205,7 @@ const DailyRoutine: React.FC = () => {
                     }
                 );
             } else {
-                alert(
-                    "Notification permission was not granted. Please allow notifications for localhost."
-                );
+                alert("Notification permission was not granted. Please enable notifications in your browser settings.");
             }
         } catch (error) {
             console.log(

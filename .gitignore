@@ -1,3 +1,33 @@
 node_modules/
 dist/
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE files
+.idea/
+*.code-workspace
+
+# Playwright
+playwright-report/
+test-results/
+
+# Screenshots / test artifacts
+device_screen.png
+device_screenshot.png
+ui.xml
+
+# Duplicate nested project
+our website/our website/
+
+# Python backend
+.venv/
+__pycache__/
+.pytest_cache/

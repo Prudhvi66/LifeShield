@@ -46,15 +46,15 @@ export class AIRiskEngine {
     else if (heatIndex >= 32) riskScore = 45;
 
     // Exertion + exposure multiplier
-    if (env.sunExposureMins > 45 && vitals.activityLevel !== 'rest') {
+    if (env.sunExposureMins > 45 && vitals.activityLevel && vitals.activityLevel !== 'rest') {
       riskScore += 15;
     }
     // High heart rate in heat
-    if (vitals.heartRate > baseline.restingHeartRate + 25) {
+    if (vitals.heartRate && vitals.heartRate > baseline.restingHeartRate + 25) {
       riskScore += 15;
     }
     // Low hydration penalty
-    if (vitals.hydrationIndex < 50) {
+    if (vitals.hydrationIndex && vitals.hydrationIndex < 50) {
       riskScore += 10;
     }
 
@@ -103,16 +103,18 @@ export class AIRiskEngine {
     baseline: PersonalBaseline
   ): { riskLevel: SafetyRiskLevel; score: number; reason: string; advice: string[] } {
     let score = 10;
-    const isSpO2Low = vitals.spO2 < baseline.normalSpO2Min;
+    const isSpO2Low = Boolean(vitals.spO2 && vitals.spO2 < baseline.normalSpO2Min);
     const isAQIHigh = env.aqi > 200;
 
     if (env.aqi > 300) score += 40;
     else if (env.aqi > 200) score += 25;
     else if (env.aqi > 100) score += 15;
 
-    if (vitals.spO2 <= 90) score += 50;
-    else if (vitals.spO2 <= 93) score += 30;
-    else if (isSpO2Low) score += 15;
+    if (vitals.spO2) {
+      if (vitals.spO2 <= 90) score += 50;
+      else if (vitals.spO2 <= 93) score += 30;
+      else if (isSpO2Low) score += 15;
+    }
 
     score = Math.min(100, score);
 
@@ -129,7 +131,7 @@ export class AIRiskEngine {
         'Rest in a well-ventilated indoor space.',
         'If shortness of breath or chest discomfort occurs, consult a medical professional.'
       ];
-    } else if (vitals.spO2 <= 90) {
+    } else if (vitals.spO2 && vitals.spO2 <= 90) {
       riskLevel = 'HIGH RISK';
       reason = `Low blood oxygen saturation detected: SpO2 is currently ${vitals.spO2}%, significantly below normal threshold.`;
       advice = [
@@ -156,6 +158,15 @@ export class AIRiskEngine {
     vitals: VitalsData,
     baseline: PersonalBaseline
   ): { isAnomaly: boolean; severity: SafetyRiskLevel; reason: string; advice: string[] } {
+    if (!vitals.heartRate) {
+      return {
+        isAnomaly: false,
+        severity: 'SAFE',
+        reason: 'Heart rate telemetry is not available from a connected device.',
+        advice: ['Connect a Bluetooth Low Energy heart rate monitor or smartwatch in the Health tab.']
+      };
+    }
+
     const isAtRest = vitals.activityLevel === 'rest' || vitals.activityLevel === 'inactive';
     const hrDelta = vitals.heartRate - baseline.restingHeartRate;
 
@@ -193,6 +204,7 @@ export class AIRiskEngine {
       advice: ['Cardiovascular vitals appear within your typical pattern.']
     };
   }
+
 
   /**
    * Central Edge AI Multi-Signal Fusion Engine
@@ -317,7 +329,7 @@ export class AIRiskEngine {
         signals: [
           { label: 'Current HR', value: `${vitals.heartRate} BPM` },
           { label: 'Resting Baseline', value: `${baseline.restingHeartRate} BPM` },
-          { label: 'Activity State', value: vitals.activityLevel }
+          { label: 'Activity State', value: vitals.activityLevel || 'unknown' }
         ],
         detectedAt: new Date().toLocaleTimeString()
       });

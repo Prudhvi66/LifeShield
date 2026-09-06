@@ -1,0 +1,77 @@
+"""
+LifeShield Application Configuration.
+Reads settings from environment variables or .env file.
+"""
+from functools import lru_cache
+from typing import List, Optional
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    # General
+    app_name: str = "LifeShield API"
+    environment: str = Field(default="development")
+    cors_origins: List[str] = Field(default_factory=lambda: ["*"])
+
+    # Database: Supports PostgreSQL (e.g. postgresql://user:pass@localhost:5432/db) or SQLite fallback
+    database_url: str = Field(default="sqlite:///./lifeshield.db")
+
+    # Security & JWT
+    jwt_secret_key: str = Field(default="lifeshield_super_secure_jwt_secret_key_2026_change_in_production")
+    jwt_algorithm: str = Field(default="HS256")
+    access_token_expire_minutes: int = Field(default=10080)  # 7 days
+
+    # Telephony Provider (Twilio)
+    twilio_account_sid: Optional[str] = Field(default=None)
+    twilio_auth_token: Optional[str] = Field(default=None)
+    twilio_from_number: Optional[str] = Field(default=None)
+
+    # Telephony Message Templates
+    sos_voice_message: str = Field(
+        default=(
+            "This is an automated emergency alert from LifeShield. "
+            "The user who listed you as an emergency contact has triggered "
+            "an SOS alert at risk level {tier}. Please check on them immediately. "
+            "Location: {maps_link}."
+        )
+    )
+    sos_sms_message: str = Field(
+        default=(
+            "LifeShield SOS Alert: {name} triggered an emergency SOS (Risk Tier: {tier}). "
+            "Last known location: {maps_link}. Please check on them or call emergency services."
+        )
+    )
+    fall_voice_message: str = Field(
+        default=(
+            "This is an automated fall alert from LifeShield. "
+            "{name} may have experienced a fall and did not respond to the on-screen safety check. "
+            "Location: {maps_link}. Please check on them immediately."
+        )
+    )
+    fall_sms_message: str = Field(
+        default=(
+            "LifeShield Fall Alert: {name} had an unconfirmed fall detected and timed out on the safety check. "
+            "Location: {maps_link}. Please check on them immediately."
+        )
+    )
+
+    # AI API Keys (Optional server-side keys)
+    gemini_api_key: Optional[str] = Field(default=None)
+    openai_api_key: Optional[str] = Field(default=None)
+    openweather_api_key: Optional[str] = Field(default=None)
+
+    @property
+    def telephony_configured(self) -> bool:
+        return bool(self.twilio_account_sid and self.twilio_auth_token and self.twilio_from_number)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

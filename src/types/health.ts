@@ -1,18 +1,21 @@
 export type SafetyRiskLevel = 'SAFE' | 'CAUTION' | 'HIGH RISK' | 'EMERGENCY';
 
 export interface VitalsData {
-  heartRate: number; // in BPM (e.g. 72)
-  spO2: number; // in percentage (e.g. 98%)
-  bodyTemperature: number; // in Celsius (e.g. 36.8)
-  activityLevel: 'rest' | 'light' | 'moderate' | 'intense' | 'inactive'; // current exertion
-  stepsCount: number;
-  sleepHours: number; // last night sleep (e.g. 7.2)
-  hydrationIndex: number; // 0 - 100%
-  fatigueIndex: number; // 0 - 100%
-  respirationRate: number; // breaths / min
-  bloodPressureSys: number;
-  bloodPressureDia: number;
+  heartRate?: number | null; // in BPM (e.g. 72) or null if unavailable
+  spO2?: number | null; // in percentage (e.g. 98%) or null if unavailable
+  bodyTemperature?: number | null; // in Celsius (e.g. 36.8) or null if unavailable
+  activityLevel?: 'rest' | 'light' | 'moderate' | 'intense' | 'inactive' | 'unknown';
+  stepsCount?: number | null;
+  sleepHours?: number | null;
+  hydrationIndex?: number | null;
+  fatigueIndex?: number | null;
+  respirationRate?: number | null;
+  bloodPressureSys?: number | null;
+  bloodPressureDia?: number | null;
   timestamp: string;
+  source?: 'ble' | 'health_connect' | 'manual' | 'unavailable';
+  deviceName?: string;
+  batteryLevel?: number;
 }
 
 export interface PersonalBaseline {
@@ -46,9 +49,9 @@ export interface HealthAnomaly {
 
 export interface HistoricalHealthDataPoint {
   timeLabel: string;
-  heartRate: number;
-  spO2: number;
-  temperature: number;
-  activityScore: number;
-  riskScore: number;
+  heartRate?: number | null;
+  spO2?: number | null;
+  temperature?: number | null;
+  activityScore?: number;
+  riskScore?: number;
 }

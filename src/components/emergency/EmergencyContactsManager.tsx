@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { UserPlus, Trash2, Phone, Bell, Shield } from 'lucide-react';
+import { UserPlus, Trash2, Phone, Bell, Shield, Loader2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { EmergencyContact } from '../../types/emergency';
+import { apiClient } from '../../services/apiClient';
 
 export const EmergencyContactsManager: React.FC = () => {
   const { user, updateUser } = useApp();
@@ -11,13 +12,34 @@ export const EmergencyContactsManager: React.FC = () => {
   const [newPhone, setNewPhone] = useState('');
   const [newPriority, setNewPriority] = useState<1 | 2 | 3>(1);
   const [newAutoNotify, setNewAutoNotify] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
 
-  const handleAddContact = (e: React.FormEvent) => {
+  const handleAddContact = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim() || !newPhone.trim()) return;
 
+    setIsSaving(true);
+    let contactId = `cnt-${Date.now()}`;
+
+    try {
+      const saved = await apiClient.contacts.create({
+        name: newName.trim(),
+        phone: newPhone.trim(),
+        relation: newRel.trim() || 'Family',
+        priority: newPriority,
+        auto_notify: newAutoNotify,
+      });
+      if (saved && saved.id) {
+        contactId = saved.id;
+      }
+    } catch (err) {
+      console.warn('Could not persist contact to backend, saving locally:', err);
+    } finally {
+      setIsSaving(false);
+    }
+
     const contact: EmergencyContact = {
-      id: `cnt-${Date.now()}`,
+      id: contactId,
       name: newName.trim(),
       relationship: newRel.trim() || 'Family',
       phone: newPhone.trim(),
@@ -36,18 +58,33 @@ export const EmergencyContactsManager: React.FC = () => {
     setShowAddForm(false);
   };
 
-  const handleDeleteContact = (id: string) => {
+  const handleDeleteContact = async (id: string) => {
+    try {
+      await apiClient.contacts.delete(id);
+    } catch (err) {
+      console.warn('Backend delete contact skipped/failed:', err);
+    }
+
     updateUser(prev => ({
       ...prev,
       emergencyContacts: prev.emergencyContacts.filter(c => c.id !== id)
     }));
   };
 
-  const handleToggleAutoNotify = (id: string) => {
+  const handleToggleAutoNotify = async (id: string) => {
+    const contact = user.emergencyContacts.find(c => c.id === id);
+    const newStatus = contact ? !contact.autoNotify : true;
+
+    try {
+      await apiClient.contacts.update(id, { auto_notify: newStatus });
+    } catch (err) {
+      console.warn('Backend update contact skipped/failed:', err);
+    }
+
     updateUser(prev => ({
       ...prev,
       emergencyContacts: prev.emergencyContacts.map(c =>
-        c.id === id ? { ...c, autoNotify: !c.autoNotify } : c
+        c.id === id ? { ...c, autoNotify: newStatus } : c
       )
     }));
   };
@@ -152,9 +189,11 @@ export const EmergencyContactsManager: React.FC = () => {
               </button>
               <button
                 type="submit"
-                className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-md"
+                disabled={isSaving}
+                className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-md flex items-center gap-1.5"
               >
-                Save Contact
+                {isSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isSaving ? 'Saving...' : 'Save Contact'}</span>
               </button>
             </div>
           </div>
