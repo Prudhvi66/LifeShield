@@ -1,5 +1,9 @@
 export type SafetyRiskLevel = 'SAFE' | 'CAUTION' | 'HIGH RISK' | 'EMERGENCY';
 
+export type DataSourceMode = 'real' | 'demo' | 'mixed' | 'unavailable';
+
+export type DataSourceConnection = 'CONNECTED_REAL_DATA' | 'NOT_CONNECTED_DEMO' | 'CONNECTED_NO_DATA';
+
 export interface VitalsData {
   heartRate?: number | null; // in BPM (e.g. 72) or null if unavailable
   spO2?: number | null; // in percentage (e.g. 98%) or null if unavailable
@@ -16,6 +20,9 @@ export interface VitalsData {
   source?: 'ble' | 'health_connect' | 'manual' | 'unavailable';
   deviceName?: string;
   batteryLevel?: number;
+  dataSource?: DataSourceMode;
+  lastSyncTime?: string;
+  connectionState?: DataSourceConnection;
 }
 
 export interface PersonalBaseline {

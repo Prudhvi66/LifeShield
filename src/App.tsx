@@ -3,12 +3,30 @@ import "./index.css";
 import { apiClient } from "./services/apiClient";
 import { bluetoothService, BLEDeviceStatus } from "./services/bluetoothService";
 import { voiceTtsService, VoiceLanguage, VoiceSettings } from "./services/voiceTtsService";
+import { reminderScheduler, SchedulerReminder } from "./services/reminderScheduler";
 import { soundService } from "./services/soundService";
 import { LocationService, GeoLocationResult, MedicalCenterPoint } from "./services/locationService";
 import { StorageService } from "./services/storageService";
 import { HealthConnectService } from "./services/healthConnectService";
+import { LandingPage } from "./components/landing/LandingPage";
+import { RiskAnalysisView } from "./components/risk/RiskAnalysisView";
+import { WearablesView } from "./components/wearables/WearablesView";
+import { HealthHistoryView } from "./components/history/HealthHistoryView";
+import { AlertsView } from "./components/alerts/AlertsView";
+import { SettingsView } from "./components/settings/SettingsView";
 
-type Tab = "home" | "health" | "safety" | "ai" | "profile";
+type Tab =
+  | "home"
+  | "health"
+  | "safety"
+  | "ai"
+  | "profile"
+  | "landing"
+  | "risk"
+  | "wearables"
+  | "history"
+  | "alerts"
+  | "settings";
 
 type ActiveModal =
   | "none"
@@ -20,9 +38,12 @@ type ActiveModal =
   | "map"
   | "sos_countdown"
   | "fall_siren"
+  | "high_hr_alert"
   | "manual_vitals"
   | "permissions"
-  | "environment";
+  | "environment"
+  | "sos_status"
+  | "emergency_settings";
 
 type HealthData = {
   heart_rate?: number | null;
@@ -97,7 +118,20 @@ export function App() {
   const [activeModal, setActiveModal] = useState<ActiveModal>("none");
 
   // Core Application State
-  const [health, setHealth] = useState<HealthData>({});
+  // Initialize with demo vitals so dashboard always has values to display.
+  // These get replaced with real data when backend/sync provides it.
+  const [health, setHealth] = useState<HealthData>({
+    heart_rate: 72,
+    spo2: 98,
+    temperature: 36.6,
+    steps: 4250,
+    sleep: 7.33,
+    hydration: 55,
+    systolic_bp: 118,
+    diastolic_bp: 76,
+    source: "Demo Data (Web Simulation)",
+    timestamp: new Date().toISOString(),
+  });
   const [environment, setEnvironment] = useState<EnvironmentData>({});
   const [trends, setTrends] = useState<any[]>([]);
   const [reminders, setReminders] = useState<ReminderItem[]>([]);
@@ -115,12 +149,44 @@ export function App() {
   const [isSyncingHealthConnect, setIsSyncingHealthConnect] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [statusToast, setStatusToast] = useState<{ message: string; type: "info" | "success" | "warning" } | null>(null);
+  const [dataSource, setDataSource] = useState<"real" | "demo" | "mixed">("demo");
 
   // Fall Detection & Emergency Countdown
   const [fallDetectionActive, setFallDetectionActive] = useState(true);
   const [emergencyCountdown, setEmergencyCountdown] = useState<number>(10);
   const [fallSirenCountdown, setFallSirenCountdown] = useState<number>(30);
+  const [highHrCountdown, setHighHrCountdown] = useState<number>(30);
+  const [highHrValue, setHighHrValue] = useState<number | null>(null);
+  const lastHrAlertTimeRef = useRef<number>(0);
   const countdownTimerRef = useRef<any>(null);
+
+  // SOS Status & Duplicate Prevention
+  const [sosStatus, setSosStatus] = useState<{
+    recorded: boolean;
+    locationObtained: boolean;
+    locationAccuracy: number | null;
+    locationTimestamp: string | null;
+    lat: number | null;
+    lon: number | null;
+    primaryContactStatus: string;
+    otherContactsStatus: string;
+    emergencyServiceStatus: string;
+    locationShared: boolean;
+    message: string;
+    cancelled: boolean;
+    contactsAttempted: number;
+    sosEventId: string | null;
+  } | null>(null);
+  const sosInProgressRef = useRef<boolean>(false);
+
+  // GPS data acquired during SOS countdown
+  const [sosGpsData, setSosGpsData] = useState<{ lat: number; lon: number; accuracy: number; timestamp: string } | null>(null);
+  const sosGpsRequestedRef = useRef<boolean>(false);
+
+  // Emergency Service Configuration
+  const [emergencyServiceNumber, setEmergencyServiceNumber] = useState<string>(
+    () => localStorage.getItem("lifeshield_emergency_number") || "112"
+  );
 
   // AI Chat State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -161,11 +227,30 @@ export function App() {
   const [newReminderType, setNewReminderType] = useState("Medicine");
   const [newReminderDosage, setNewReminderDosage] = useState("");
 
+  // Reminder Scheduler Diagnostics
+  const [notifPermission, setNotifPermission] = useState<"granted" | "denied" | "default" | "unsupported">(() =>
+    voiceTtsService.getNotificationPermission()
+  );
+  const [schedulerActive, setSchedulerActive] = useState(false);
+  const [schedulerNextReminder, setSchedulerNextReminder] = useState<string>("None");
+  const [browserTime, setBrowserTime] = useState(() => {
+    const now = new Date();
+    return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+  });
+  const [reminderToast, setReminderToast] = useState<string | null>(null);
+
   // New Contact Form
   const [newContactName, setNewContactName] = useState("");
   const [newContactPhone, setNewContactPhone] = useState("");
   const [newContactRel, setNewContactRel] = useState("Family");
   const [newContactPriority, setNewContactPriority] = useState<1 | 2 | 3>(1);
+
+  // Edit Contact Form
+  const [editingContactId, setEditingContactId] = useState<string | null>(null);
+  const [editContactName, setEditContactName] = useState("");
+  const [editContactPhone, setEditContactPhone] = useState("");
+  const [editContactRel, setEditContactRel] = useState("Family");
+  const [editContactPriority, setEditContactPriority] = useState<1 | 2 | 3>(1);
 
   // Baseline Form
   const [baselineRestingHr, setBaselineRestingHr] = useState(72);
@@ -182,9 +267,92 @@ export function App() {
   };
 
   // -------------------------------------------------------------
+  // REMINDER SCHEDULER (reliable frontend execution)
+  // -------------------------------------------------------------
+  const triggeredRemindersRef = useRef<Set<string>>(new Set());
+
+  // Initialize and manage the reminder scheduler
+  useEffect(() => {
+    if (reminders.length === 0) {
+      reminderScheduler.stop();
+      setSchedulerActive(false);
+      setSchedulerNextReminder("None");
+      return;
+    }
+
+    // Map reminders to scheduler format
+    const schedulerReminders: SchedulerReminder[] = reminders.map((r) => ({
+      id: r.id,
+      title: r.title,
+      reminder_type: r.reminder_type,
+      time: r.time,
+      dosage: r.dosage,
+      repeat: r.repeat,
+      voice_enabled: r.voice_enabled,
+      is_active: r.is_active,
+    }));
+
+    reminderScheduler.start(schedulerReminders);
+    setSchedulerActive(true);
+
+    // Listen for triggered reminders to show in-app toast
+    const unsub = reminderScheduler.onEvent((event) => {
+      if (event.type === "triggered" && event.reminder) {
+        const r = event.reminder;
+        const msg = `Reminder: ${r.title}${r.dosage ? " - " + r.dosage : ""} at ${r.time}`;
+        setReminderToast(msg);
+        setTimeout(() => setReminderToast(null), 8000);
+      }
+    });
+
+    // Update diagnostic info
+    const updateDiagnostics = () => {
+      const next = reminderScheduler.nextReminder;
+      setSchedulerNextReminder(next ? `${next.title} at ${next.time}` : "None");
+      setBrowserTime(reminderScheduler.currentBrowserTime);
+      setSchedulerActive(reminderScheduler.isActive);
+    };
+
+    updateDiagnostics();
+    const diagInterval = setInterval(updateDiagnostics, 1000);
+
+    return () => {
+      unsub();
+      clearInterval(diagInterval);
+      reminderScheduler.stop();
+      setSchedulerActive(false);
+    };
+  }, [reminders]);
+
+  // Unlock speech synthesis on first user interaction
+  useEffect(() => {
+    const unlock = () => {
+      voiceTtsService.unlock();
+      window.removeEventListener("click", unlock);
+      window.removeEventListener("touchstart", unlock);
+    };
+    window.addEventListener("click", unlock);
+    window.addEventListener("touchstart", unlock);
+    return () => {
+      window.removeEventListener("click", unlock);
+      window.removeEventListener("touchstart", unlock);
+    };
+  }, []);
+
+  // Update browser time every second for diagnostics
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setBrowserTime(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // -------------------------------------------------------------
   // INITIALIZATION & REAL DATA SYNC
   // -------------------------------------------------------------
   const loadData = useCallback(async () => {
+    console.log("[LifeShield Health] loadData() starting — demo vitals active until real data arrives");
     setIsRefreshing(true);
     try {
       // 1. Auth & Profile
@@ -201,27 +369,78 @@ export function App() {
       }
 
       // 2. Health Summary
-      const summary = await apiClient.health.getSummary().catch(() => null);
-      if (summary) {
+      const summary = await apiClient.health.getSummary().catch((err: any) => {
+        console.warn("[LifeShield Health] Health summary unavailable:", err.message);
+        return null;
+      });
+
+      // Validate whether the backend reading contains real physiological data.
+      // A reading with heart_rate=0 or all-null fields is NOT real data.
+      const hasValidReading = (s: any): boolean => {
+        if (!s || !s.latest) return false;
+        const l = s.latest;
+        const hr = l.heart_rate;
+        const spo2 = l.spo2;
+        const steps = l.steps;
+        const temp = l.body_temperature;
+        const hasHR = typeof hr === 'number' && hr > 0 && hr < 300;
+        const hasSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
+        const hasSteps = typeof steps === 'number' && steps > 0;
+        const hasTemp = typeof temp === 'number' && temp > 30 && temp < 45;
+        return hasHR || hasSpO2 || hasSteps || hasTemp;
+      };
+
+      if (summary && hasValidReading(summary)) {
         setBackendOnline(true);
-        if (summary.latest) {
-          const l = summary.latest;
-          setHealth({
-            heart_rate: l.heart_rate,
-            spo2: l.spo2,
-            temperature: l.body_temperature,
-            steps: summary.total_steps_today || l.steps,
-            sleep: l.sleep_hours,
-            hydration: l.hydration_index,
-            systolic_bp: l.systolic_bp,
-            diastolic_bp: l.diastolic_bp,
-            source: l.source || "Wearable Device",
-            timestamp: l.timestamp,
-          });
-          setLastSyncTime(new Date().toLocaleTimeString());
-        }
+        const l = summary.latest;
+        const sourceIsReal = l.source && !l.source.toLowerCase().includes("demo");
+
+        console.log("[LifeShield Health] Real health data found from backend:", {
+          source: l.source,
+          heart_rate: l.heart_rate,
+          spo2: l.spo2,
+          steps: l.steps,
+          temperature: l.body_temperature,
+        });
+
+        setHealth({
+          heart_rate: l.heart_rate,
+          spo2: l.spo2,
+          temperature: l.body_temperature,
+          steps: summary.total_steps_today || l.steps,
+          sleep: l.sleep_hours,
+          hydration: l.hydration_index,
+          systolic_bp: l.systolic_bp,
+          diastolic_bp: l.diastolic_bp,
+          source: l.source || "Wearable Device",
+          timestamp: l.timestamp,
+        });
+        setDataSource(sourceIsReal ? "real" : "demo");
+        setLastSyncTime(new Date().toLocaleTimeString());
+        console.log("[LifeShield Health] Using", sourceIsReal ? "REAL" : "DEMO", "vitals");
       } else {
-        setBackendOnline(false);
+        // No valid real device data — keep/use demo vitals
+        if (summary && summary.latest) {
+          console.log("[LifeShield Health] Backend returned reading but it has no valid vital signs (e.g. heart_rate=0). Using DEMO.");
+        } else {
+          console.log("[LifeShield Health] No backend health data available, using DEMO vitals");
+        }
+        setBackendOnline(true);
+        setHealth({
+          heart_rate: 72,
+          spo2: 98,
+          temperature: 36.6,
+          steps: 4250,
+          sleep: 7.33,
+          hydration: 55,
+          systolic_bp: 118,
+          diastolic_bp: 76,
+          source: "Demo Data (Web Simulation)",
+          timestamp: new Date().toISOString(),
+        });
+        setDataSource("demo");
+        setLastSyncTime(new Date().toLocaleTimeString() + " (Demo)");
+        console.log("[LifeShield Health] Data source: DEMO");
       }
 
       // 3. Environment (Real Open-Meteo)
@@ -248,7 +467,10 @@ export function App() {
       setTrends(trendData || []);
 
       // 5. Reminders
-      const rems = await apiClient.reminders.list().catch(() => []);
+      const rems = await apiClient.reminders.list().catch((err: any) => {
+        console.warn("Reminders unavailable (login required):", err.message);
+        return [];
+      });
       if (rems && rems.length > 0) {
         setReminders(
           rems.map((r: any) => ({
@@ -265,7 +487,10 @@ export function App() {
       }
 
       // 6. Emergency Contacts
-      const cnts = await apiClient.contacts.list().catch(() => []);
+      const cnts = await apiClient.contacts.list().catch((err: any) => {
+        console.warn("Contacts unavailable (login required):", err.message);
+        return [];
+      });
       if (cnts && cnts.length > 0) {
         setContacts(
           cnts.map((c: any) => ({
@@ -286,7 +511,7 @@ export function App() {
         setBaselineSpo2Floor(bl.normal_spo2_min || 95);
       }
     } catch (e) {
-      console.warn("Real data loading error:", e);
+      console.warn("[LifeShield Health] Data loading error, keeping demo vitals:", e);
     } finally {
       setIsRefreshing(false);
     }
@@ -333,7 +558,100 @@ export function App() {
   // -------------------------------------------------------------
   // EMERGENCY SOS & FALL DETECTION ENGINE
   // -------------------------------------------------------------
+  const requestBrowserGeolocation = (): Promise<{ lat: number; lon: number; accuracy: number; timestamp: string } | null> => {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        console.warn("Geolocation not supported by browser");
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          resolve({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+            timestamp: new Date(position.timestamp).toISOString(),
+          });
+        },
+        (error) => {
+          console.warn("Geolocation error:", error.message);
+          resolve(null);
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      );
+    });
+  };
+
+  const buildEmergencyMessage = (
+    userName: string,
+    gpsData: { lat: number; lon: number; accuracy: number } | null
+  ): string => {
+    const timeStr = new Date().toLocaleString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+
+    const lines = [
+      "LIFESHIELD EMERGENCY ALERT",
+      "",
+      "Emergency SOS triggered.",
+      "",
+    ];
+
+    if (gpsData) {
+      const mapsLink = `https://www.google.com/maps?q=${gpsData.lat},${gpsData.lon}`;
+      lines.push(
+        "Current location:",
+        `Latitude: ${gpsData.lat.toFixed(6)}`,
+        `Longitude: ${gpsData.lon.toFixed(6)}`,
+        `Accuracy: ${Math.round(gpsData.accuracy)} meters`,
+        `Map: ${mapsLink}`,
+      );
+    } else {
+      lines.push(
+        "Current location:",
+        "Latitude: unavailable",
+        "Longitude: unavailable",
+        "Accuracy: unavailable",
+        "Map: Location could not be obtained",
+      );
+    }
+
+    lines.push(
+      "",
+      `Time: ${timeStr}`,
+      `Name: ${userName}`,
+      "",
+      "Please contact the person immediately.",
+      "",
+      "This is an automated emergency alert from LifeShield.",
+    );
+
+    return lines.join("\n");
+  };
+
   const startSosCountdown = () => {
+    // Prevent duplicate SOS
+    if (sosInProgressRef.current) {
+      showToast("Emergency SOS is already in progress.", "warning");
+      return;
+    }
+    sosInProgressRef.current = true;
+    sosGpsRequestedRef.current = false;
+    setSosGpsData(null);
+
+    // Request GPS immediately when countdown starts
+    requestBrowserGeolocation().then((gps) => {
+      setSosGpsData(gps);
+      sosGpsRequestedRef.current = true;
+    });
+
     setEmergencyCountdown(10);
     setActiveModal("sos_countdown");
     soundService.startEmergencySiren();
@@ -353,6 +671,20 @@ export function App() {
   };
 
   const triggerFallSirenModal = () => {
+    if (sosInProgressRef.current) {
+      showToast("Emergency SOS is already in progress.", "warning");
+      return;
+    }
+    sosInProgressRef.current = true;
+    sosGpsRequestedRef.current = false;
+    setSosGpsData(null);
+
+    // Request GPS immediately
+    requestBrowserGeolocation().then((gps) => {
+      setSosGpsData(gps);
+      sosGpsRequestedRef.current = true;
+    });
+
     setFallSirenCountdown(30);
     setActiveModal("fall_siren");
     soundService.startEmergencySiren();
@@ -371,38 +703,218 @@ export function App() {
     }, 1000);
   };
 
-  const cancelEmergencyAlert = () => {
+  const triggerHighHrAlertModal = (hrValue: number) => {
+    if (sosInProgressRef.current) return;
+    sosInProgressRef.current = true;
+    sosGpsRequestedRef.current = false;
+    setSosGpsData(null);
+
+    // Request GPS immediately
+    requestBrowserGeolocation().then((gps) => {
+      setSosGpsData(gps);
+      sosGpsRequestedRef.current = true;
+    });
+
+    setHighHrValue(hrValue);
+    setHighHrCountdown(30);
+    setActiveModal("high_hr_alert");
+    soundService.startEmergencySiren();
+
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    countdownTimerRef.current = setInterval(() => {
+      setHighHrCountdown((prev) => {
+        soundService.playCountdownTick(prev <= 10);
+        if (prev <= 1) {
+          clearInterval(countdownTimerRef.current);
+          dispatchEmergencySos();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  // Monitor vitals for high heart rate anomaly threshold (> baseline + 30 or > 120 BPM)
+  useEffect(() => {
+    if (health.heart_rate && health.heart_rate > Math.max(120, baselineRestingHr + 30)) {
+      const now = Date.now();
+      if (now - lastHrAlertTimeRef.current > 300000 && activeModal === "none") {
+        lastHrAlertTimeRef.current = now;
+        triggerHighHrAlertModal(health.heart_rate);
+      }
+    }
+  }, [health.heart_rate, baselineRestingHr, activeModal]);
+
+  const cancelEmergencyAlert = async () => {
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     soundService.stopEmergencySiren();
     soundService.playSafeChime();
+    sosInProgressRef.current = false;
+
+    // Record cancellation to backend if authenticated
+    if (apiClient.getToken()) {
+      try {
+        const gpsData = await requestBrowserGeolocation();
+        await apiClient.sos.cancel({
+          lat: gpsData?.lat || undefined,
+          lon: gpsData?.lon || undefined,
+          location_accuracy: gpsData?.accuracy || undefined,
+          location_timestamp: gpsData?.timestamp || undefined,
+        });
+      } catch (err) {
+        console.warn("Failed to record SOS cancellation:", err);
+      }
+    }
+
     setActiveModal("none");
-    showToast("Emergency alert cancelled. You are safe.", "info");
+    setSosStatus({
+      recorded: true,
+      locationObtained: false,
+      locationAccuracy: null,
+      locationTimestamp: null,
+      lat: null,
+      lon: null,
+      primaryContactStatus: "Not attempted",
+      otherContactsStatus: "Not attempted",
+      emergencyServiceStatus: "Not attempted",
+      locationShared: false,
+      message: "SOS cancelled by user. No emergency contacts were notified.",
+      cancelled: true,
+      contactsAttempted: 0,
+      sosEventId: null,
+    });
+    setActiveModal("sos_status");
+    showToast("SOS cancelled. You are safe.", "info");
   };
 
   const dispatchEmergencySos = async () => {
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     soundService.stopEmergencySiren();
     setActiveModal("none");
 
-    const payload = {
-      lat: currentLocation?.latitude || 17.385,
-      lon: currentLocation?.longitude || 78.4867,
-      address: currentLocation?.formattedAddress || "Hyderabad, India",
-      risk_tier: "Emergency",
-      risk_score: 95,
-      contacts: contacts.map((c) => ({ name: c.name, phone: c.phone })),
-    };
+    // Use pre-acquired GPS data from countdown, or try to get it now
+    const gpsData = sosGpsData || await requestBrowserGeolocation();
 
-    try {
-      await apiClient.sos.trigger(payload);
-      showToast("Emergency SOS broadcast to LifeShield Cloud & contacts.", "success");
-    } catch (e: any) {
-      showToast("SOS dispatch error: " + (e.message || "Failed to reach server"), "warning");
+    // Build the emergency message with real or unavailable coordinates
+    const userName = user?.full_name || "LifeShield User";
+    const emergencyMessage = buildEmergencyMessage(userName, gpsData);
+
+    // Prepare status tracking
+    let primaryContactStatus = "Not configured";
+    let otherContactsStatus = "No other contacts";
+    let emergencyServiceStatus = "Not configured";
+    let locationShared = false;
+    let recordedToBackend = false;
+    let sosEventId: string | null = null;
+    let contactsAttempted = 0;
+
+    // Step 2: Save SOS event to backend if authenticated
+    if (apiClient.getToken()) {
+      try {
+        const result = await apiClient.sos.trigger({
+          lat: gpsData?.lat || undefined,
+          lon: gpsData?.lon || undefined,
+          location_accuracy: gpsData?.accuracy || undefined,
+          location_timestamp: gpsData?.timestamp || undefined,
+          risk_tier: "Emergency",
+          risk_score: 95,
+          emergency_message: emergencyMessage,
+        });
+
+        recordedToBackend = true;
+        sosEventId = result.id || null;
+
+        // Parse per-contact status from backend response
+        if (result.contacts_notified && result.contacts_notified.length > 0) {
+          contactsAttempted = result.contacts_notified.length;
+          const primary = result.contacts_notified.find(
+            (c: any) => c.call?.status === "dispatched" || c.sms?.status === "dispatched"
+          );
+          if (primary) {
+            primaryContactStatus = `Attempted — SMS: ${primary.sms?.status || "N/A"}, Call: ${primary.call?.status || "N/A"}`;
+          } else {
+            const first = result.contacts_notified[0];
+            primaryContactStatus = `Attempted — SMS: ${first.sms?.status || "N/A"}, Call: ${first.call?.status || "N/A"}`;
+          }
+
+          if (result.contacts_notified.length > 1) {
+            const others = result.contacts_notified.slice(1);
+            const otherStatuses = others.map(
+              (c: any) => `${c.name}: SMS ${c.sms?.status || "N/A"}, Call ${c.call?.status || "N/A"}`
+            );
+            otherContactsStatus = otherStatuses.join("; ");
+          } else {
+            otherContactsStatus = "No other contacts";
+          }
+
+          if (gpsData) {
+            locationShared = true;
+          }
+
+          if (result.status === "simulated") {
+            emergencyServiceStatus = "NOT CONFIGURED (Twilio not set)";
+          } else {
+            emergencyServiceStatus = result.telephony_live ? "Attempted" : "NOT CONFIGURED";
+          }
+        } else {
+          primaryContactStatus = "No emergency contacts configured";
+          otherContactsStatus = "No contacts";
+          emergencyServiceStatus = "No contacts to notify";
+        }
+      } catch (err: any) {
+        console.error("SOS backend dispatch error:", err);
+        recordedToBackend = false;
+        primaryContactStatus = "Backend error: " + (err.message || "Unknown");
+      }
+    } else {
+      primaryContactStatus = "Not authenticated — SOS not saved to backend";
     }
 
-    // Direct phone dial link if priority contact available
+    // Step 3: Open browser fallbacks if telephony not configured
+    if (primaryContactStatus.includes("simulated") || primaryContactStatus.includes("NOT CONFIGURED") || !apiClient.getToken()) {
+      const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
+      if (primaryContact) {
+        const smsUrl = `sms:${primaryContact.phone}?body=${encodeURIComponent(emergencyMessage)}`;
+        try {
+          window.location.href = smsUrl;
+          primaryContactStatus += " | SMS composer opened (browser fallback)";
+        } catch {
+          primaryContactStatus += " | SMS composer not available on this device";
+        }
+      }
+    }
+
+    // Step 4: Show clear final status
+    const statusMessage = recordedToBackend
+      ? (gpsData
+        ? "Emergency SOS recorded with GPS location. Check status below."
+        : "Emergency SOS recorded. Location was unavailable.")
+      : "Emergency SOS processed locally. Backend not available or not authenticated.";
+
+    setSosStatus({
+      recorded: recordedToBackend,
+      locationObtained: !!gpsData,
+      locationAccuracy: gpsData?.accuracy || null,
+      locationTimestamp: gpsData?.timestamp || null,
+      lat: gpsData?.lat || null,
+      lon: gpsData?.lon || null,
+      primaryContactStatus,
+      otherContactsStatus,
+      emergencyServiceStatus,
+      locationShared,
+      message: statusMessage,
+      cancelled: false,
+      contactsAttempted,
+      sosEventId,
+    });
+
+    sosInProgressRef.current = false;
+    setActiveModal("sos_status");
+
+    // Step 5: Offer to call emergency contact
     const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
-    if (primaryContact) {
-      window.location.href = `tel:${primaryContact.phone}`;
+    if (primaryContact && !primaryContactStatus.includes("No emergency contacts")) {
+      showToast(`Tap to call ${primaryContact.name} (${primaryContact.phone})`, "warning");
     }
   };
 
@@ -421,7 +933,19 @@ export function App() {
             source: "Bluetooth Smartwatch (GATT)",
             timestamp: new Date().toISOString(),
           }));
+
+          // Validate that BLE data contains real physiological values
+          const hasValidHR = typeof vitals.heartRate === 'number' && vitals.heartRate > 0 && vitals.heartRate < 300;
+          const hasValidSpO2 = typeof vitals.spO2 === 'number' && vitals.spO2 > 0 && vitals.spO2 <= 100;
+          const hasRealBleData = hasValidHR || hasValidSpO2;
+          setDataSource(hasRealBleData ? "real" : "demo");
           setLastSyncTime(new Date().toLocaleTimeString());
+
+          console.log("[LifeShield Health] Bluetooth data received:", {
+            heartRate: vitals.heartRate,
+            spO2: vitals.spO2,
+            hasRealBleData,
+          });
 
           // Commit reading to database
           apiClient.health
@@ -467,6 +991,26 @@ export function App() {
         setLastSyncTime(new Date().toLocaleTimeString());
 
         if (syncResult.hasData && syncResult.data) {
+          // Validate that returned values are actually valid physiological readings.
+          // heart_rate=0, spo2=0, steps=0 are NOT real data.
+          const hr = syncResult.data.heart_rate;
+          const spo2 = syncResult.data.spo2;
+          const steps = syncResult.data.steps;
+          const temp = syncResult.data.temperature;
+          const hasValidHR = typeof hr === 'number' && hr > 0 && hr < 300;
+          const hasValidSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
+          const hasValidSteps = typeof steps === 'number' && steps > 0;
+          const hasValidTemp = typeof temp === 'number' && temp > 30 && temp < 45;
+          const hasAnyRealData = hasValidHR || hasValidSpO2 || hasValidSteps || hasValidTemp;
+
+          console.log("[LifeShield Health] Health Connect sync result:", {
+            hasAnyRealData,
+            heart_rate: hr,
+            spo2: spo2,
+            steps: steps,
+            temperature: temp,
+          });
+
           setHealth((prev) => ({
             ...prev,
             heart_rate: syncResult.data.heart_rate ?? prev.heart_rate,
@@ -477,6 +1021,7 @@ export function App() {
             source: "Android Health Connect",
             timestamp: new Date().toISOString(),
           }));
+          setDataSource(hasAnyRealData ? "real" : "demo");
 
           // Ingest into backend database
           await apiClient.health.ingestReading({
@@ -488,9 +1033,12 @@ export function App() {
             source: "Android Health Connect",
           });
 
+          console.log("[LifeShield Health] Data source:", hasAnyRealData ? "REAL" : "DEMO");
           showToast("Real health metrics synchronized from Health Connect!", "success");
         } else {
+          setDataSource("demo");
           showToast(syncResult.message, "info");
+          console.log("[LifeShield Health] Health Connect returned no data, using DEMO");
         }
       } else {
         setHealthConnectStatus(syncResult.message);
@@ -546,6 +1094,13 @@ export function App() {
     if (manualTemp) payload.body_temperature = Number(manualTemp);
     if (manualSteps) payload.steps = Number(manualSteps);
 
+    if (!apiClient.getToken()) {
+      showToast("Please sign in first to log vitals to the database.", "warning");
+      setActiveModal("auth");
+      setManualLogging(false);
+      return;
+    }
+
     try {
       await apiClient.health.ingestReading(payload);
       await loadData();
@@ -570,6 +1125,12 @@ export function App() {
   const handleAddReminder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newReminderTitle.trim()) return;
+
+    if (!apiClient.getToken()) {
+      showToast("Please sign in first to save reminders. Tap the avatar icon in the top right.", "warning");
+      setActiveModal("auth");
+      return;
+    }
 
     try {
       const created = await apiClient.reminders.create({
@@ -603,10 +1164,12 @@ export function App() {
   };
 
   const handleSpeakReminder = (item: ReminderItem) => {
+    voiceTtsService.unlock();
     voiceTtsService.speakReminder({
       title: item.title,
       dosage: item.dosage,
       reminderType: item.reminder_type,
+      force: true,
     });
   };
 
@@ -632,6 +1195,12 @@ export function App() {
   const handleAddContact = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newContactName.trim() || !newContactPhone.trim()) return;
+
+    if (!apiClient.getToken()) {
+      showToast("Please sign in first to save contacts. Tap the avatar icon in the top right.", "warning");
+      setActiveModal("auth");
+      return;
+    }
 
     try {
       const created = await apiClient.contacts.create({
@@ -663,13 +1232,54 @@ export function App() {
   };
 
   const handleDeleteContact = async (id: string) => {
-    try {
-      await apiClient.contacts.delete(id);
-    } catch (err) {
-      console.warn("Backend contact delete skipped:", err);
+    if (apiClient.getToken()) {
+      try {
+        await apiClient.contacts.delete(id);
+      } catch (err) {
+        console.warn("Backend contact delete skipped:", err);
+      }
     }
     setContacts((prev) => prev.filter((c) => c.id !== id));
     showToast("Contact removed.", "info");
+  };
+
+  const handleEditContact = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingContactId || !editContactName.trim() || !editContactPhone.trim()) return;
+
+    if (!apiClient.getToken()) {
+      showToast("Please sign in first to edit contacts.", "warning");
+      setActiveModal("auth");
+      return;
+    }
+
+    try {
+      await apiClient.contacts.update(editingContactId, {
+        name: editContactName.trim(),
+        phone: editContactPhone.trim(),
+        relation: editContactRel.trim(),
+        priority: editContactPriority,
+      });
+
+      setContacts((prev) =>
+        prev.map((c) =>
+          c.id === editingContactId
+            ? {
+                ...c,
+                name: editContactName.trim(),
+                phone: editContactPhone.trim(),
+                relation: editContactRel.trim(),
+                priority: editContactPriority,
+              }
+            : c
+        )
+      );
+
+      setEditingContactId(null);
+      showToast("Contact updated.", "success");
+    } catch (err: any) {
+      showToast("Could not update contact: " + err.message, "warning");
+    }
   };
 
   // -------------------------------------------------------------
@@ -761,6 +1371,22 @@ export function App() {
     setChatInput("");
     setIsAiLoading(true);
 
+    if (!apiClient.getToken()) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `ai-auth-${Date.now()}`,
+          sender: "assistant",
+          text: "Please sign in to use the AI Health Assistant. Tap the avatar icon in the top right corner to sign in or register. The AI assistant needs your account to access your health data and provide personalized guidance.",
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          source: "auth_required",
+        },
+      ]);
+      setIsAiLoading(false);
+      setActiveModal("auth");
+      return;
+    }
+
     try {
       const response = await apiClient.ai.chat(text.trim(), {
         language: voiceSettings.language,
@@ -810,15 +1436,76 @@ export function App() {
 
   // Multi-factor transparent risk score calculation
   const calculateRiskScore = () => {
-    let score = 12; // Baseline healthy score
-    if (health.heart_rate && health.heart_rate > baselineRestingHr + 25) score += 20;
-    if (health.spo2 && health.spo2 < baselineSpo2Floor) score += 35;
-    if (environment.temperature && environment.temperature > 38) score += 15;
-    if (environment.aqi && environment.aqi > 150) score += 18;
-    return Math.min(100, score);
+    let score = 8; // Baseline healthy score
+    let factors: string[] = [];
+
+    // Heart rate: elevated if > resting + 25
+    if (health.heart_rate && health.heart_rate > baselineRestingHr + 25) {
+      score += 18;
+      factors.push("Elevated heart rate");
+    }
+
+    // SpO2: critical if < 90, warning if < 95
+    if (health.spo2) {
+      if (health.spo2 < 90) { score += 30; factors.push("Critically low SpO2"); }
+      else if (health.spo2 < baselineSpo2Floor) { score += 15; factors.push("Low SpO2"); }
+    }
+
+    // Temperature: elevated if > 38, high fever if > 39.5
+    if (health.temperature) {
+      if (health.temperature > 39.5) { score += 20; factors.push("High fever"); }
+      else if (health.temperature > 38) { score += 10; factors.push("Elevated temperature"); }
+    }
+
+    // Sleep: poor if < 5 hours
+    if (health.sleep && health.sleep < 5) {
+      score += 8;
+      factors.push("Insufficient sleep");
+    }
+
+    // Blood pressure: elevated if systolic > 140 or diastolic > 90
+    if (health.systolic_bp && health.systolic_bp > 140) {
+      score += 12;
+      factors.push("High systolic BP");
+    }
+    if (health.diastolic_bp && health.diastolic_bp > 90) {
+      score += 10;
+      factors.push("High diastolic BP");
+    }
+
+    // Environment: AQI
+    if (environment.aqi) {
+      if (environment.aqi > 300) { score += 25; factors.push("Hazardous AQI"); }
+      else if (environment.aqi > 200) { score += 18; factors.push("Very unhealthy AQI"); }
+      else if (environment.aqi > 150) { score += 12; factors.push("Unhealthy AQI"); }
+      else if (environment.aqi > 100) { score += 6; factors.push("Moderate AQI"); }
+    }
+
+    // Environment: Heat index
+    if (environment.heat_index) {
+      if (environment.heat_index > 45) { score += 20; factors.push("Extreme heat index"); }
+      else if (environment.heat_index > 40) { score += 12; factors.push("Very high heat index"); }
+      else if (environment.heat_index > 35) { score += 6; factors.push("High heat index"); }
+    }
+
+    // Environment: Flood risk
+    if (environment.flood_risk_level && environment.flood_risk_level.toLowerCase().includes("high")) {
+      score += 10;
+      factors.push("High flood risk");
+    }
+
+    // Environment: UV index
+    if (environment.uv_index && environment.uv_index > 8) {
+      score += 5;
+      factors.push("Very high UV");
+    }
+
+    return { score: Math.min(100, score), factors };
   };
 
-  const currentRiskScore = calculateRiskScore();
+  const riskCalc = calculateRiskScore();
+  const currentRiskScore = riskCalc.score;
+  const riskFactors = riskCalc.factors;
   const riskTier =
     currentRiskScore >= 70 ? "Critical" : currentRiskScore >= 45 ? "High" : currentRiskScore >= 25 ? "Moderate" : "Low";
 
@@ -853,6 +1540,32 @@ export function App() {
           }}
         >
           {statusToast.message}
+        </div>
+      )}
+
+      {/* In-app Reminder Toast */}
+      {reminderToast && (
+        <div
+          style={{
+            position: "fixed",
+            top: statusToast ? "124px" : "84px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "linear-gradient(135deg, #7c3aed, #6c63ff)",
+            color: "#ffffff",
+            padding: "12px 24px",
+            borderRadius: "18px",
+            fontSize: "13px",
+            fontWeight: 700,
+            boxShadow: "0 10px 30px rgba(124,58,237,0.4)",
+            zIndex: 301,
+            maxWidth: "90%",
+            textAlign: "center",
+            animation: "fadeIn 0.2s ease-out",
+            border: "2px solid #a78bfa",
+          }}
+        >
+          {reminderToast}
         </div>
       )}
 
@@ -918,6 +1631,7 @@ export function App() {
             user={user}
             riskScore={currentRiskScore}
             riskTier={riskTier}
+            riskFactors={riskFactors}
             reminders={reminders}
             display={display}
             available={available}
@@ -926,6 +1640,8 @@ export function App() {
             onOpenLogVitals={() => setActiveModal("manual_vitals")}
             onOpenEnvironment={() => setActiveModal("environment")}
             onLogHydration={handleLogHydration}
+            dataSource={dataSource}
+            lastSyncTime={lastSyncTime}
           />
         )}
 
@@ -942,6 +1658,7 @@ export function App() {
             onRefresh={loadData}
             onOpenDeviceModal={() => setActiveModal("device")}
             onOpenLogVitals={() => setActiveModal("manual_vitals")}
+            dataSource={dataSource}
           />
         )}
 
@@ -1007,6 +1724,7 @@ export function App() {
             onOpenPermissions={() => setActiveModal("permissions")}
             onOpenReminders={() => setActiveModal("reminders")}
             onOpenDeviceModal={() => setActiveModal("device")}
+            onOpenEmergencySettings={() => setActiveModal("emergency_settings")}
             onLogout={handleLogout}
             onExportRecords={() => {
               const data = StorageService.exportAllUserData();
@@ -1227,6 +1945,82 @@ export function App() {
               <h3>Reminders & Medicine Schedules</h3>
               <button className="ls-close-btn" onClick={() => setActiveModal("none")}>
                 ✕
+              </button>
+            </div>
+
+            {/* Voice & Notification Controls */}
+            <div style={{ display: "flex", gap: "8px", marginBottom: "12px", alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: "11px", color: "#6a6486", fontWeight: 600 }}>Voice: {voiceSettings.masterVoiceEnabled ? "ON" : "OFF"}</span>
+              <span style={{ fontSize: "11px", color: notifPermission === "granted" ? "#38a169" : notifPermission === "denied" ? "#e53e3e" : "#d69e2e", fontWeight: 600 }}>
+                Notifications: {notifPermission === "granted" ? "Allowed" : notifPermission === "denied" ? "Denied" : notifPermission === "unsupported" ? "Unsupported" : "Not granted"}
+              </span>
+              <button
+                type="button"
+                className="ls-btn-secondary"
+                style={{ padding: "5px 10px", fontSize: "11px" }}
+                onClick={() => {
+                  const updated = { ...voiceSettings, masterVoiceEnabled: !voiceSettings.masterVoiceEnabled };
+                  setVoiceSettings(updated);
+                  voiceTtsService.saveSettings(updated);
+                }}
+              >
+                {voiceSettings.masterVoiceEnabled ? "Mute Voice" : "Enable Voice"}
+              </button>
+              <button
+                type="button"
+                className="ls-btn-secondary"
+                style={{ padding: "5px 10px", fontSize: "11px" }}
+                onClick={async () => {
+                  voiceTtsService.unlock();
+                  await voiceTtsService.speakRaw("LifeShield reminder test. Your reminder voice is working.", "en");
+                }}
+              >
+                Test Voice
+              </button>
+              <button
+                type="button"
+                className="ls-btn-secondary"
+                style={{ padding: "5px 10px", fontSize: "11px", background: notifPermission === "granted" ? "#c6f6d5" : "#fefcbf" }}
+                onClick={async () => {
+                  const result = await voiceTtsService.requestNotificationPermission();
+                  setNotifPermission(result);
+                  if (result === "denied") {
+                    showToast("Browser notifications are blocked. You can still use LifeShield voice reminders.", "warning");
+                  } else if (result === "granted") {
+                    showToast("Notifications enabled!", "success");
+                  }
+                }}
+              >
+                Enable Notifications
+              </button>
+            </div>
+
+            {/* Scheduler Diagnostics */}
+            <div style={{ background: "#f0f0ff", borderRadius: "12px", padding: "10px 14px", marginBottom: "12px", fontSize: "11px" }}>
+              <div style={{ fontWeight: 700, color: "#6c65b5", marginBottom: "4px", fontSize: "12px" }}>Scheduler Diagnostics</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px" }}>
+                <span style={{ color: "#555" }}>Scheduler:</span>
+                <span style={{ fontWeight: 600, color: schedulerActive ? "#38a169" : "#e53e3e" }}>{schedulerActive ? "ACTIVE" : "INACTIVE"}</span>
+                <span style={{ color: "#555" }}>Current browser time:</span>
+                <span style={{ fontWeight: 600, fontFamily: "monospace" }}>{browserTime}</span>
+                <span style={{ color: "#555" }}>Next reminder:</span>
+                <span style={{ fontWeight: 600 }}>{schedulerNextReminder}</span>
+              </div>
+            </div>
+
+            {/* Test Reminder Now */}
+            <div style={{ marginBottom: "12px" }}>
+              <button
+                type="button"
+                className="ls-btn-primary"
+                style={{ width: "100%", padding: "8px", fontSize: "12px", background: "linear-gradient(135deg, #7c3aed, #6c63ff)" }}
+                onClick={() => {
+                  reminderScheduler.triggerTestReminder("Test Medicine", "1 Tablet after food", "Medicine");
+                  setReminderToast("Test reminder triggered! Check notification and voice.");
+                  setTimeout(() => setReminderToast(null), 8000);
+                }}
+              >
+                Test Reminder Now
               </button>
             </div>
 
@@ -1681,13 +2475,50 @@ export function App() {
             <div className="ls-countdown-ring">
               <span className="ls-countdown-number">{emergencyCountdown}</span>
             </div>
-            <h3 style={{ margin: "0 0 8px", color: "#3d1f24" }}>Dispatching Emergency Alarm</h3>
-            <p style={{ fontSize: "12px", color: "#8a5860", margin: "0 auto 20px", maxWidth: "340px" }}>
-              Your current GPS coordinates will be sent to your priority emergency contacts and LifeShield cloud dispatch.
+            <h3 style={{ margin: "0 0 8px", color: "#3d1f24" }}>Emergency SOS activating</h3>
+            <p style={{ fontSize: "12px", color: "#8a5860", margin: "0 auto 6px", maxWidth: "340px" }}>
+              Real browser GPS is being acquired. Your emergency contacts will receive your live location.
+            </p>
+            {/* Show live GPS coordinates */}
+            <div style={{
+              background: sosGpsData ? "#f0fdf4" : "#fff8f0",
+              padding: "10px 14px",
+              borderRadius: "12px",
+              margin: "0 auto 8px",
+              maxWidth: "340px",
+              fontSize: "11px",
+              textAlign: "left",
+            }}>
+              {sosGpsData ? (
+                <>
+                  <div style={{ fontWeight: 700, color: "#2d7a3a", marginBottom: "4px" }}>GPS Location Acquired</div>
+                  <div>Lat: {sosGpsData.lat.toFixed(6)}</div>
+                  <div>Lon: {sosGpsData.lon.toFixed(6)}</div>
+                  <div>Accuracy: ±{Math.round(sosGpsData.accuracy)}m</div>
+                  <a
+                    href={`https://www.google.com/maps?q=${sosGpsData.lat},${sosGpsData.lon}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#2563eb", textDecoration: "underline" }}
+                  >
+                    Open in Google Maps
+                  </a>
+                </>
+              ) : (
+                <div style={{ color: "#b45309" }}>
+                  <div style={{ fontWeight: 600 }}>Acquiring GPS location...</div>
+                  <div>Please allow location permission when prompted</div>
+                </div>
+              )}
+            </div>
+            <p style={{ fontSize: "10px", color: "#b89", margin: "0 auto 12px", maxWidth: "340px" }}>
+              {contacts.length > 0
+                ? `${contacts.length} emergency contact(s) configured`
+                : "No emergency contacts configured — SOS will still be recorded"}
             </p>
             <div style={{ display: "flex", gap: "12px" }}>
               <button className="ls-btn-primary" style={{ flex: 1 }} onClick={cancelEmergencyAlert}>
-                Cancel SOS (I Am Safe)
+                I'M OK / CANCEL
               </button>
               <button className="ls-btn-danger" style={{ flex: 1 }} onClick={dispatchEmergencySos}>
                 Dispatch Immediately
@@ -1708,9 +2539,14 @@ export function App() {
               <span className="ls-countdown-number">{fallSirenCountdown}</span>
             </div>
             <h3 style={{ margin: "0 0 8px", color: "#3d1f24" }}>Are you okay?</h3>
-            <p style={{ fontSize: "12px", color: "#8a5860", margin: "0 auto 20px", maxWidth: "340px" }}>
+            <p style={{ fontSize: "12px", color: "#8a5860", margin: "0 auto 6px", maxWidth: "340px" }}>
               High-G accelerometer impact registered. If you do not tap "I'M OK" before the timer expires, automated
-              emergency dispatch will trigger.
+              emergency dispatch will trigger with your real GPS location.
+            </p>
+            <p style={{ fontSize: "10px", color: "#b89", margin: "0 auto 16px", maxWidth: "340px" }}>
+              {contacts.length > 0
+                ? `${contacts.length} emergency contact(s) will be notified`
+                : "No emergency contacts configured"}
             </p>
             <div style={{ display: "flex", gap: "12px" }}>
               <button
@@ -1722,6 +2558,42 @@ export function App() {
               </button>
               <button className="ls-btn-danger" style={{ flex: 1 }} onClick={dispatchEmergencySos}>
                 I Need Help
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8b. HIGH HEART RATE 30-SECOND COUNTDOWN ALERT MODAL */}
+      {activeModal === "high_hr_alert" && (
+        <div className="ls-modal-overlay">
+          <div className="ls-modal-content" style={{ textAlign: "center" }}>
+            <div className="ls-badge ls-badge-danger" style={{ fontSize: "12px", padding: "6px 14px" }}>
+              CRITICAL HIGH HEART RATE DETECTED
+            </div>
+            <div className="ls-countdown-ring" style={{ borderColor: "#e53e3e" }}>
+              <span className="ls-countdown-number" style={{ color: "#e53e3e" }}>{highHrCountdown}</span>
+            </div>
+            <h3 style={{ margin: "0 0 8px", color: "#3d1f24" }}>Elevated Heart Rate: {highHrValue || health.heart_rate || "—"} BPM</h3>
+            <p style={{ fontSize: "12px", color: "#8a5860", margin: "0 auto 6px", maxWidth: "340px" }}>
+              Your heart rate significantly exceeds your resting baseline threshold ({baselineRestingHr + 30} BPM).
+              If you do not press "I'M OK" before timer expires, emergency contacts will be notified with your real GPS location.
+            </p>
+            <p style={{ fontSize: "10px", color: "#b89", margin: "0 auto 16px", maxWidth: "340px" }}>
+              {contacts.length > 0
+                ? `${contacts.length} emergency contact(s) will be notified`
+                : "No emergency contacts configured"}
+            </p>
+            <div style={{ display: "flex", gap: "12px" }}>
+              <button
+                className="ls-btn-primary"
+                style={{ flex: 1, padding: "16px", fontSize: "14px", fontWeight: 900 }}
+                onClick={cancelEmergencyAlert}
+              >
+                I'M OK (Cancel Alert)
+              </button>
+              <button className="ls-btn-danger" style={{ flex: 1 }} onClick={dispatchEmergencySos}>
+                Dispatch SOS Now
               </button>
             </div>
           </div>
@@ -1901,12 +2773,12 @@ export function App() {
 
             <div style={{ textAlign: "left", fontSize: "12px", color: "#4f4a64" }}>
               {[
-                { name: "GPS Location (Fine & Coarse)", status: "Granted", icon: "📍" },
-                { name: "Body Sensors & Motion Accelerometer", status: "Granted", icon: "🏃" },
-                { name: "Bluetooth LE Smartwatch Connectivity", status: "Available", icon: "⌚" },
-                { name: "Android Health Connect Bridge", status: "Supported", icon: "❤️" },
-                { name: "Emergency Phone & SMS Dispatch", status: "Configured", icon: "📞" },
-                { name: "Push Notifications", status: "Active", icon: "🔔" },
+                { name: "GPS Location (Browser Geolocation)", status: navigator.geolocation ? "Available" : "Not Supported", icon: "📍", ok: !!navigator.geolocation },
+                { name: "Motion Accelerometer (Fall Detection)", status: "devicemotion" in window ? "Available" : "Not Supported", icon: "🏃", ok: "devicemotion" in window },
+                { name: "Bluetooth LE Smartwatch (Web BLE)", status: "Available in Chromium browsers", icon: "⌚", ok: true },
+                { name: "Android Health Connect Bridge", status: "Native Android only", icon: "❤️", ok: true },
+                { name: "Emergency SMS/Call Dispatch", status: apiClient.getToken() ? "Simulated (Twilio not configured)" : "Login required to configure", icon: "📞", ok: false },
+                { name: "Text-to-Speech Voice", status: "speechSynthesis" in window ? "Browser Web Speech API" : "Not Supported", icon: "🔊", ok: "speechSynthesis" in window },
               ].map((p, i) => (
                 <div
                   key={i}
@@ -1922,7 +2794,7 @@ export function App() {
                     <span>{p.icon}</span>
                     <strong style={{ color: "#342f4c" }}>{p.name}</strong>
                   </div>
-                  <span className="ls-badge ls-badge-success">{p.status}</span>
+                  <span className={`ls-badge ${p.ok ? "ls-badge-success" : "ls-badge-info"}`}>{p.status}</span>
                 </div>
               ))}
 
@@ -1948,6 +2820,198 @@ export function App() {
           </div>
         </div>
       )}
+
+      {/* 12. SOS STATUS PANEL MODAL */}
+      {activeModal === "sos_status" && sosStatus && (
+        <div className="ls-modal-overlay" onClick={() => setActiveModal("none")}>
+          <div className="ls-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "420px" }}>
+            <div className="ls-modal-header">
+              <h3 style={{ color: sosStatus.cancelled ? "#8a5860" : "#3d1f24" }}>
+                {sosStatus.cancelled ? "SOS Cancelled" : "SOS Status"}
+              </h3>
+              <button className="ls-close-btn" onClick={() => setActiveModal("none")}>✕</button>
+            </div>
+
+            <div style={{ textAlign: "left", fontSize: "12px", color: "#47415e" }}>
+              {/* Overall message */}
+              <div style={{
+                background: sosStatus.cancelled ? "#fff8f0" : (sosStatus.recorded ? "#f0fdf4" : "#fef3f2"),
+                padding: "12px 14px",
+                borderRadius: "14px",
+                marginBottom: "14px",
+                fontWeight: 600,
+              }}>
+                {sosStatus.cancelled ? "⚠" : (sosStatus.recorded ? "✓" : "✗")} {sosStatus.message}
+              </div>
+
+              {/* Status rows */}
+              {[
+                {
+                  label: "SOS Event Recorded",
+                  value: sosStatus.recorded
+                    ? `✓ Yes${sosStatus.sosEventId ? ` (ID: ${sosStatus.sosEventId.slice(0, 8)}...)` : ""}`
+                    : "✗ Not recorded (backend unavailable or not authenticated)",
+                  ok: sosStatus.recorded,
+                },
+                {
+                  label: "GPS Location",
+                  value: sosStatus.locationObtained
+                    ? `✓ Obtained (±${Math.round(sosStatus.locationAccuracy || 0)}m accuracy)`
+                    : "⚠ Location unavailable (permission denied or not supported)",
+                  ok: sosStatus.locationObtained,
+                },
+                ...(sosStatus.lat && sosStatus.lon ? [{
+                  label: "Coordinates",
+                  value: `${sosStatus.lat.toFixed(6)}, ${sosStatus.lon.toFixed(6)}`,
+                  ok: true,
+                }] : []),
+                {
+                  label: "Primary Emergency Contact",
+                  value: sosStatus.primaryContactStatus,
+                  ok: sosStatus.primaryContactStatus.includes("dispatched") || sosStatus.primaryContactStatus.includes("Attempted"),
+                },
+                {
+                  label: "Other Emergency Contacts",
+                  value: sosStatus.otherContactsStatus,
+                  ok: sosStatus.otherContactsStatus.includes("Attempted"),
+                },
+                {
+                  label: "Emergency Service",
+                  value: sosStatus.emergencyServiceStatus,
+                  ok: false,
+                },
+                {
+                  label: "Location Shared",
+                  value: sosStatus.locationShared ? "✓ Yes (included in emergency message)" : "✗ No",
+                  ok: sosStatus.locationShared,
+                },
+              ].map((row, i) => (
+                <div key={i} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  padding: "10px 0",
+                  borderBottom: "1px solid #f0edf7",
+                  gap: "10px",
+                }}>
+                  <span style={{ fontWeight: 600, color: "#342f4c", flexShrink: 0 }}>{row.label}</span>
+                  <span style={{
+                    textAlign: "right",
+                    color: row.ok ? "#2d7a3a" : "#b45309",
+                    fontSize: "11px",
+                  }}>
+                    {row.value}
+                  </span>
+                </div>
+              ))}
+
+              {/* Action buttons */}
+              <div style={{ display: "flex", gap: "10px", marginTop: "16px", flexWrap: "wrap" }}>
+                {contacts.length > 0 && !sosStatus.cancelled && (
+                  <a
+                    href={`tel:${contacts.find((c) => c.priority === 1)?.phone || contacts[0]?.phone}`}
+                    className="ls-btn-danger"
+                    style={{ flex: 1, textAlign: "center", textDecoration: "none", padding: "10px", fontSize: "12px" }}
+                  >
+                    Call Primary Contact
+                  </a>
+                )}
+                <a
+                  href={`tel:${emergencyServiceNumber}`}
+                  className="ls-btn-danger"
+                  style={{ flex: 1, textAlign: "center", textDecoration: "none", padding: "10px", fontSize: "12px" }}
+                >
+                  Call {emergencyServiceNumber} (Emergency Service)
+                </a>
+                {sosStatus.lat && sosStatus.lon && (
+                  <a
+                    href={`https://www.google.com/maps?q=${sosStatus.lat},${sosStatus.lon}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="ls-btn-secondary"
+                    style={{ flex: 1, textAlign: "center", textDecoration: "none", padding: "10px", fontSize: "12px" }}
+                  >
+                    Open Location in Maps
+                  </a>
+                )}
+                <button
+                  className="ls-btn-secondary"
+                  style={{ flex: 1, padding: "10px", fontSize: "12px" }}
+                  onClick={() => setActiveModal("none")}
+                >
+                  Close
+                </button>
+              </div>
+
+              {/* Vitals source label */}
+              <div style={{ marginTop: "12px", fontSize: "10px", color: "#999", textAlign: "center" }}>
+                Vitals: {health.source?.includes("Demo") ? "Demo Data (Web Simulation)" : "Real Device Data"} &nbsp;|&nbsp;
+                Emergency Location: {sosStatus.locationObtained ? "Browser GPS (Real)" : "Unavailable"}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 13. EMERGENCY SERVICE SETTINGS MODAL */}
+      {activeModal === "emergency_settings" && (
+        <div className="ls-modal-overlay" onClick={() => setActiveModal("none")}>
+          <div className="ls-modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="ls-modal-header">
+              <h3>Emergency Service Configuration</h3>
+              <button className="ls-close-btn" onClick={() => setActiveModal("none")}>✕</button>
+            </div>
+
+            <div style={{ textAlign: "left", fontSize: "12px", color: "#47415e" }}>
+              <p style={{ marginBottom: "12px", color: "#6a6486" }}>
+                Configure the emergency/ambulance phone number. This number is shown during SOS activation and can be called directly.
+              </p>
+
+              <div style={{ marginBottom: "12px" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "6px" }}>
+                  Emergency Service Number
+                </label>
+                <input
+                  type="tel"
+                  className="ls-input"
+                  value={emergencyServiceNumber}
+                  onChange={(e) => {
+                    setEmergencyServiceNumber(e.target.value);
+                    localStorage.setItem("lifeshield_emergency_number", e.target.value);
+                  }}
+                  placeholder="e.g. 112, 108, 911"
+                  style={{ width: "100%" }}
+                />
+                <div style={{ fontSize: "10px", color: "#8d87a4", marginTop: "4px" }}>
+                  Default: 112 (India National Emergency). Common numbers: 108 (Ambulance), 100 (Police), 101 (Fire), 911 (US).
+                </div>
+              </div>
+
+              <div style={{
+                background: "#f8f6fd",
+                padding: "10px 14px",
+                borderRadius: "14px",
+                marginBottom: "14px",
+                fontSize: "11px",
+              }}>
+                <strong>Important:</strong> LifeShield does NOT dispatch emergency services automatically. This number provides a direct call action during SOS activation. For actual ambulance dispatch, call the number directly or use your local emergency services.
+              </div>
+
+              <button
+                className="ls-btn-primary"
+                style={{ width: "100%" }}
+                onClick={() => {
+                  localStorage.setItem("lifeshield_emergency_number", emergencyServiceNumber);
+                  showToast(`Emergency service number saved: ${emergencyServiceNumber}`, "success");
+                  setActiveModal("none");
+                }}
+              >
+                Save Configuration
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1961,6 +3025,7 @@ function HomeScreen({
   user,
   riskScore,
   riskTier,
+  riskFactors,
   reminders,
   display,
   available,
@@ -1969,12 +3034,15 @@ function HomeScreen({
   onOpenLogVitals,
   onOpenEnvironment,
   onLogHydration,
+  dataSource,
+  lastSyncTime,
 }: {
   health: HealthData;
   environment: EnvironmentData;
   user: UserAccount | null;
   riskScore: number;
   riskTier: string;
+  riskFactors: string[];
   reminders: ReminderItem[];
   display: (v: number | null | undefined, s?: string) => string;
   available: (v: number | null | undefined) => boolean;
@@ -1983,6 +3051,8 @@ function HomeScreen({
   onOpenLogVitals: () => void;
   onOpenEnvironment: () => void;
   onLogHydration: () => void;
+  dataSource: "real" | "demo" | "mixed";
+  lastSyncTime: string | null;
 }) {
   const nextMedicine = reminders.find((r) => r.reminder_type === "Medicine") || reminders[0];
 
@@ -2028,9 +3098,14 @@ function HomeScreen({
             Status: {riskTier} Risk ({riskScore}/100)
           </div>
           <div className="score-description">
-            Transparent composite based on heart rate, SpO2 baseline floor, wet-bulb heat index, and ambient AQI.
-            Safety indicator only — not a clinical diagnosis.
+            Transparent composite based on heart rate, SpO2, temperature, sleep, blood pressure, AQI, heat index, and flood risk.
+            {dataSource === "demo" ? " Based on simulated demo vitals." : " Safety indicator only — not a clinical diagnosis."}
           </div>
+          {riskFactors.length > 0 && (
+            <div style={{ marginTop: "10px", fontSize: "11px", color: "rgba(255,255,255,0.85)" }}>
+              <strong>Contributing factors:</strong> {riskFactors.join(", ")}
+            </div>
+          )}
 
           <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
             <button className="soft-button" type="button" onClick={() => onNavigate("health")}>
@@ -2060,6 +3135,37 @@ function HomeScreen({
         <div>
           <span>LIVE TELEMETRY</span>
           <h2>Today's overview</h2>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "10px",
+                fontWeight: 700,
+                background: dataSource === "real" ? "#ecfdf5" : dataSource === "demo" ? "#fffbeb" : "#f1f5f9",
+                color: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#64748b",
+                border: `1px solid ${dataSource === "real" ? "#bbf7d0" : dataSource === "demo" ? "#fde68a" : "#e2e8f0"}`,
+              }}
+            >
+              <span
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  borderRadius: "50%",
+                  background: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#94a3b8",
+                }}
+              />
+              {dataSource === "real" ? "LIVE DATA" : dataSource === "demo" ? "DEMO DATA" : "NO DATA"}
+            </span>
+            {lastSyncTime && (
+              <span style={{ fontSize: "10px", color: "#94a3b8" }}>
+                Last synced: {lastSyncTime}
+              </span>
+            )}
+          </div>
         </div>
         <button type="button" onClick={() => onNavigate("health")}>
           See all
@@ -2072,7 +3178,7 @@ function HomeScreen({
             icon="♥"
             title="Heart Rate"
             value={display(health.heart_rate)}
-            unit={available(health.heart_rate) ? "BPM" : "Unavailable"}
+            unit={available(health.heart_rate) ? (dataSource === "demo" ? "BPM (Demo)" : "BPM") : "Unavailable"}
             variant="peach"
           />
         </div>
@@ -2081,7 +3187,7 @@ function HomeScreen({
             icon="◉"
             title="Blood Oxygen"
             value={display(health.spo2)}
-            unit={available(health.spo2) ? "%" : "Unavailable"}
+            unit={available(health.spo2) ? (dataSource === "demo" ? "% (Demo)" : "%") : "Unavailable"}
             variant="lavender"
           />
         </div>
@@ -2090,7 +3196,7 @@ function HomeScreen({
             icon="⌁"
             title="Steps"
             value={display(health.steps)}
-            unit={available(health.steps) ? "steps" : "Unavailable"}
+            unit={available(health.steps) ? (dataSource === "demo" ? "steps (Demo)" : "steps") : "Unavailable"}
             variant="cream"
           />
         </div>
@@ -2099,7 +3205,7 @@ function HomeScreen({
             icon="◔"
             title="Sleep"
             value={display(health.sleep)}
-            unit={available(health.sleep) ? "hours" : "Unavailable"}
+            unit={available(health.sleep) ? (health.source?.includes("Demo") ? "hours (Demo)" : "hours") : "Unavailable"}
             variant="pink"
           />
         </div>
@@ -2219,6 +3325,7 @@ function HealthScreen({
   onRefresh,
   onOpenDeviceModal,
   onOpenLogVitals,
+  dataSource,
 }: {
   health: HealthData;
   trends: any[];
@@ -2231,6 +3338,7 @@ function HealthScreen({
   onRefresh: () => void;
   onOpenDeviceModal: () => void;
   onOpenLogVitals: () => void;
+  dataSource: "real" | "demo" | "mixed";
 }) {
   return (
     <>
@@ -2250,11 +3358,47 @@ function HealthScreen({
               ? `Connected: ${bleStatus.deviceName || "Smartwatch"}`
               : "Connect a verified health source"}
           </strong>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "10px",
+                fontWeight: 700,
+                background: dataSource === "real" ? "#ecfdf5" : dataSource === "demo" ? "#fffbeb" : "#f1f5f9",
+                color: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#64748b",
+                border: `1px solid ${dataSource === "real" ? "#bbf7d0" : dataSource === "demo" ? "#fde68a" : "#e2e8f0"}`,
+              }}
+            >
+              <span
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  borderRadius: "50%",
+                  background: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#94a3b8",
+                }}
+              />
+              {dataSource === "real" ? "LIVE DATA" : dataSource === "demo" ? "DEMO DATA" : "NO DATA"}
+            </span>
+            {lastSyncTime && (
+              <span style={{ fontSize: "10px", color: "#94a3b8" }}>
+                Last synced: {lastSyncTime}
+              </span>
+            )}
+          </div>
           <p>
             {lastSyncTime
-              ? `Last synced: ${lastSyncTime} • Source: ${health.source || "Wearable"}`
+              ? `Source: ${health.source || "Wearable"}`
               : "LifeShield only displays honest verified data. No fabricated values."}
           </p>
+          {dataSource === "demo" && (
+            <div style={{ fontSize: "10px", color: "#e67e22", marginTop: "3px", fontWeight: 700 }}>
+              Demo Mode: Values shown are simulated for web demonstration. Connect a real device for actual readings.
+            </div>
+          )}
           <div style={{ fontSize: "10px", color: "#7770bd", marginTop: "3px" }}>
             Health Connect Bridge: {healthConnectStatus}
           </div>
@@ -2283,28 +3427,28 @@ function HealthScreen({
           title="Heart Rate"
           icon="♥"
           value={display(health.heart_rate)}
-          unit={available(health.heart_rate) ? "BPM" : "Not available from connected device"}
+          unit={available(health.heart_rate) ? (dataSource === "demo" ? "BPM (Demo)" : "BPM") : "Not available from connected device"}
           variant="peach"
         />
         <DetailedHealthCard
           title="Blood Oxygen"
           icon="◉"
           value={display(health.spo2)}
-          unit={available(health.spo2) ? "%" : "Not available from connected device"}
+          unit={available(health.spo2) ? (dataSource === "demo" ? "% (Demo)" : "%") : "Not available from connected device"}
           variant="lavender"
         />
         <DetailedHealthCard
           title="Skin/Body Temp"
           icon="♨"
           value={display(health.temperature)}
-          unit={available(health.temperature) ? "°C" : "Not available from connected device"}
+          unit={available(health.temperature) ? (dataSource === "demo" ? "°C (Demo)" : "°C") : "Not available from connected device"}
           variant="cream"
         />
         <DetailedHealthCard
           title="Steps Accumulator"
           icon="⌁"
           value={display(health.steps)}
-          unit={available(health.steps) ? "steps" : "Not available from connected device"}
+          unit={available(health.steps) ? (dataSource === "demo" ? "steps (Demo)" : "steps") : "Not available from connected device"}
           variant="blue"
         />
       </section>
@@ -2395,6 +3539,13 @@ function SafetyScreen({
 
       {/* SAFETY OPTIONS DIRECTORY */}
       <section className="safety-options">
+        <SafetyOption
+          icon="🚨"
+          title="Test SOS (10s countdown)"
+          description="Simulate the full SOS flow: siren, GPS capture, emergency message, and contact dispatch (simulated)"
+          onClick={onStartSos}
+        />
+
         <SafetyOption
           icon="👥"
           title={`Emergency contacts (${contacts.length})`}
@@ -2565,6 +3716,7 @@ function ProfileScreen({
   onOpenPermissions,
   onOpenReminders,
   onOpenDeviceModal,
+  onOpenEmergencySettings,
   onLogout,
   onExportRecords,
   onClearCache,
@@ -2583,6 +3735,7 @@ function ProfileScreen({
   onOpenPermissions: () => void;
   onOpenReminders: () => void;
   onOpenDeviceModal: () => void;
+  onOpenEmergencySettings: () => void;
   onLogout: () => void;
   onExportRecords: () => void;
   onClearCache: () => void;
@@ -2688,6 +3841,7 @@ function ProfileScreen({
         <Setting icon="🔒" title="Native Android permissions" description="Location, body sensors, and Health Connect" onClick={onOpenPermissions} />
         <Setting icon="⌚" title="Connected smartwatches" description="Web Bluetooth GATT and Health Connect" onClick={onOpenDeviceModal} />
         <Setting icon="⏰" title="Medicine & wellness reminders" description="Manage reminders and dosage audit trail" onClick={onOpenReminders} />
+        <Setting icon="🚨" title="Emergency service number" description="Configure ambulance / emergency phone number" onClick={onOpenEmergencySettings} />
         <Setting
           icon="📦"
           title="Export health records (JSON)"

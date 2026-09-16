@@ -382,6 +382,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         language,
         setLanguage,
         t,
+        selectedRegion,
+        setRegion,
       }}
     >
       {children}

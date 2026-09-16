@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..auth import get_current_user
+from ..auth import require_current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/api/reminders", tags=["Reminders & Routine"])
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/reminders", tags=["Reminders & Routine"])
 def create_reminder(
     payload: schemas.ReminderCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
     user_id = current_user.id if current_user else None
 
@@ -43,11 +43,9 @@ def create_reminder(
 @router.get("", response_model=List[schemas.ReminderOut])
 def list_reminders(
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    query = db.query(models.Reminder)
-    if current_user:
-        query = query.filter((models.Reminder.user_id == current_user.id) | (models.Reminder.user_id.is_(None)))
+    query = db.query(models.Reminder).filter(models.Reminder.user_id == current_user.id)
     return query.order_by(models.Reminder.time.asc()).all()
 
 
@@ -55,11 +53,14 @@ def list_reminders(
 def update_reminder(
     reminder_id: str,
     payload: schemas.ReminderUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_current_user)
 ):
     reminder = db.get(models.Reminder, reminder_id)
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
+    if reminder.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this reminder")
 
     for field, val in payload.model_dump(exclude_unset=True).items():
         setattr(reminder, field, val)
@@ -70,10 +71,13 @@ def update_reminder(
 
 
 @router.delete("/{reminder_id}")
-def delete_reminder(reminder_id: str, db: Session = Depends(get_db)):
+def delete_reminder(reminder_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(require_current_user)):
     reminder = db.get(models.Reminder, reminder_id)
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
+    if reminder.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this reminder")
+
     db.delete(reminder)
     db.commit()
     return {"status": "ok", "message": "Reminder deleted."}
@@ -84,7 +88,7 @@ def log_reminder_action(
     reminder_id: str,
     payload: schemas.ReminderLogCreate,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
     user_id = current_user.id if current_user else None
 
@@ -107,9 +111,7 @@ def log_reminder_action(
 def get_reminder_history(
     limit: int = 50,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    query = db.query(models.ReminderLog)
-    if current_user:
-        query = query.filter((models.ReminderLog.user_id == current_user.id) | (models.ReminderLog.user_id.is_(None)))
+    query = db.query(models.ReminderLog).filter(models.ReminderLog.user_id == current_user.id)
     return query.order_by(models.ReminderLog.timestamp.desc()).limit(limit).all()

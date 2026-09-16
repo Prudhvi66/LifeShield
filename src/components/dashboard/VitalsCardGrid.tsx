@@ -12,11 +12,15 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { EcgWaveform } from './EcgWaveform';
+import { DataSourceIndicator } from './DataSourceIndicator';
 
 const UNAVAILABLE_TEXT = "Not available from connected device";
 
 export const VitalsCardGrid: React.FC = () => {
   const { vitals, user, setActiveTab } = useApp();
+
+  const isDemo = vitals.dataSource === 'demo';
+  const isReal = vitals.dataSource === 'real';
 
   const isHeartRateElevated = vitals.heartRate
     ? vitals.heartRate > (user.baseline?.restingHeartRate || 70) + 20 || vitals.heartRate > 105
@@ -45,10 +49,12 @@ export const VitalsCardGrid: React.FC = () => {
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
           <span>Live Health Telemetry</span>
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isConnected ? 'bg-[#16A673] animate-pulse' : 'bg-slate-400'
-            }`}
+          <DataSourceIndicator
+            dataSource={vitals.dataSource || 'unavailable'}
+            connectionState={vitals.connectionState || 'NOT_CONNECTED_DEMO'}
+            lastSyncTime={vitals.lastSyncTime}
+            source={vitals.source}
+            compact
           />
         </h3>
         <button
@@ -56,7 +62,7 @@ export const VitalsCardGrid: React.FC = () => {
           className="text-xs font-semibold text-[#00A88F] hover:text-[#008f7a] flex items-center gap-1.5 transition-colors"
         >
           <Bluetooth className="w-3.5 h-3.5" />
-          <span>{isConnected ? 'Manage Device' : 'Pair Sensor / Log Vitals'}</span>
+          <span>{isReal ? 'Manage Device' : 'Pair Sensor / Log Vitals'}</span>
         </button>
       </div>
 
@@ -101,6 +107,11 @@ export const VitalsCardGrid: React.FC = () => {
                     {vitals.heartRate}
                   </span>
                   <span className="text-xs font-semibold text-slate-500">BPM</span>
+                  {isDemo && (
+                    <span className="px-1.5 py-0. rounded-full text-[8px] font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                      DEMO
+                    </span>
+                  )}
                 </div>
                 {vitals.bloodPressureSys && vitals.bloodPressureDia && (
                   <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
@@ -166,6 +177,11 @@ export const VitalsCardGrid: React.FC = () => {
                     {vitals.spO2}
                   </span>
                   <span className="text-xs font-semibold text-slate-500">%</span>
+                  {isDemo && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                      DEMO
+                    </span>
+                  )}
                 </div>
                 {vitals.respirationRate && (
                   <span className="text-[11px] text-slate-500 font-mono">
@@ -242,6 +258,11 @@ export const VitalsCardGrid: React.FC = () => {
                     {vitals.bodyTemperature}
                   </span>
                   <span className="text-xs font-semibold text-slate-500">°C</span>
+                  {isDemo && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                      DEMO
+                    </span>
+                  )}
                 </div>
                 <span className="text-[11px] text-slate-500 font-mono">
                   ({((vitals.bodyTemperature * 9) / 5 + 32).toFixed(1)}°F)
@@ -298,6 +319,11 @@ export const VitalsCardGrid: React.FC = () => {
                     {vitals.stepsCount.toLocaleString()}
                   </span>
                   <span className="text-xs font-semibold text-slate-500">Steps</span>
+                  {isDemo && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[8px] font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                      DEMO
+                    </span>
+                  )}
                 </div>
                 <span className="text-[11px] text-[#16A673] font-mono font-bold">
                   {activityPercent}% Goal

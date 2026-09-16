@@ -11,6 +11,13 @@ export interface HealthConnectPluginInterface {
     permissionsGranted: boolean;
     permissions: Record<string, boolean>;
   }>;
+  requestPermissions(): Promise<{
+    permissionsGranted: boolean;
+    permissions: Record<string, boolean>;
+    grantedCount: number;
+    resultCode: number;
+    cancelled: boolean;
+  }>;
   openHealthConnectSettings(): Promise<{
     opened: boolean;
     action?: string;
@@ -72,6 +79,17 @@ export class HealthConnectService {
     }
   }
 
+  public static async requestPermissions() {
+    if (!this.isNativeAndroid()) {
+      return { permissionsGranted: false, permissions: {}, grantedCount: 0, resultCode: 0, cancelled: true };
+    }
+    try {
+      return await HealthConnectNative.requestPermissions();
+    } catch (e) {
+      return { permissionsGranted: false, permissions: {}, grantedCount: 0, resultCode: 0, cancelled: true };
+    }
+  }
+
   public static async openSettings() {
     if (!this.isNativeAndroid()) {
       return { opened: false, message: 'Settings are available on physical Android devices.' };
@@ -106,16 +124,22 @@ export class HealthConnectService {
       }
 
       // 2. Check permissions
-      const perms = await HealthConnectNative.checkPermissions();
+      let perms = await HealthConnectNative.checkPermissions();
       if (!perms.permissionsGranted) {
-        // Open settings so user can grant
-        await HealthConnectNative.openHealthConnectSettings();
-        return {
-          success: false,
-          hasData: false,
-          data: null,
-          message: 'Health Connect permissions needed. LifeShield opened the Health Connect settings. Please grant permissions and tap sync again.',
-        };
+        // Try requesting via native dialog first
+        const reqRes = await HealthConnectNative.requestPermissions().catch(() => null);
+        if (reqRes && reqRes.permissionsGranted) {
+          perms = reqRes;
+        } else {
+          // Fallback to opening settings
+          await HealthConnectNative.openHealthConnectSettings();
+          return {
+            success: false,
+            hasData: false,
+            data: null,
+            message: 'Health Connect permissions needed. LifeShield opened settings. Please grant permissions and tap sync again.',
+          };
+        }
       }
 
       // 3. Read real telemetry
@@ -136,3 +160,4 @@ export class HealthConnectService {
     }
   }
 }
+

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..ai_service import generate_ai_response
-from ..auth import get_current_user
+from ..auth import require_current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/api/ai", tags=["AI Assistant"])
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/ai", tags=["AI Assistant"])
 async def chat_with_ai(
     payload: schemas.AIChatRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
     # Enrich context with user's baseline and latest vitals if available
     context = payload.context or {}

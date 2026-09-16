@@ -302,10 +302,13 @@ class SOSCreate(BaseModel):
     device_id: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+    location_accuracy: Optional[float] = None
+    location_timestamp: Optional[str] = None
     address: Optional[str] = None
     risk_tier: Optional[str] = "Emergency"
     risk_score: Optional[int] = None
     contacts: List[Dict[str, str]] = []
+    emergency_message: Optional[str] = None
 
 
 class FallEventCreate(BaseModel):
@@ -333,6 +336,16 @@ class SOSOut(BaseModel):
     dispatched_at: Optional[datetime] = None
     contacts_notified: List[ContactDispatchResult] = []
     telephony_live: bool
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    location_accuracy: Optional[float] = None
+    location_timestamp: Optional[datetime] = None
+    cancelled: bool = False
+    emergency_service_number: Optional[str] = None
+    emergency_service_status: Optional[str] = None
+    sms_delivery_status: Optional[str] = None
+    call_status: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 # --- Hazards & Environment ---

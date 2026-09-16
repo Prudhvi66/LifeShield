@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..auth import get_current_user
+from ..auth import require_current_user
 from ..database import get_db
 from ..telephony import TelephonyService, get_telephony_service
 from .sos import _maps_link, _resolve_contacts
@@ -19,11 +19,11 @@ router = APIRouter(prefix="/api/emergency", tags=["Emergency Fall Detection"])
 def trigger_fall_alert(
     payload: schemas.FallEventCreate,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user),
+    current_user: models.User = Depends(require_current_user),
     telephony: TelephonyService = Depends(get_telephony_service)
 ):
-    user_id = current_user.id if current_user else None
-    user_name = payload.user_name or (current_user.full_name if current_user else "LifeShield User")
+    user_id = current_user.id
+    user_name = payload.user_name or current_user.full_name
     contacts = _resolve_contacts(db, current_user, payload.device_id, payload.contacts)
 
     tier = payload.risk_tier or "Emergency"

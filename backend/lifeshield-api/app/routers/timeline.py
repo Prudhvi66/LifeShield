@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..auth import get_current_user
+from ..auth import require_current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/api/timeline", tags=["Timeline"])
@@ -16,11 +16,11 @@ router = APIRouter(prefix="/api/timeline", tags=["Timeline"])
 def get_timeline(
     limit: int = 50,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
     events: List[schemas.TimelineEventOut] = []
 
-    user_id = current_user.id if current_user else None
+    user_id = current_user.id
 
     # 1. SOS Events
     sos_q = db.query(models.SOSEvent)

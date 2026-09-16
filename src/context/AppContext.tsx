@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { VitalsData, HistoricalHealthDataPoint } from '../types/health';
+import { VitalsData, HistoricalHealthDataPoint, DataSourceMode, DataSourceConnection } from '../types/health';
 import { EnvironmentalData, OfficialDisasterAlert } from '../types/environment';
 import { UserProfile, PrivacyPreferences, LanguageCode } from '../types/user';
 import { FallDetectionEvent, EmergencyDispatchPayload } from '../types/emergency';
@@ -82,21 +82,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [demoPanelOpen, setDemoPanelOpen] = useState(false);
   const [activeScenario, setActiveScenario] = useState<SimulationScenario>('NORMAL_BASELINE');
 
-  // Initialize vitals honestly without fake numbers
+  // Initialize with demo vitals so dashboard always has values immediately.
+  // These get replaced with real data when backend/sync provides it.
+  console.log('[LifeShield Health] Initializing vitals with DEMO data');
   const [vitals, setVitals] = useState<VitalsData>({
-    heartRate: null,
-    spO2: null,
-    bodyTemperature: null,
-    activityLevel: 'unknown',
-    stepsCount: null,
-    sleepHours: null,
-    hydrationIndex: null,
+    heartRate: 72,
+    spO2: 98,
+    bodyTemperature: 36.6,
+    activityLevel: 'light',
+    stepsCount: 4250,
+    sleepHours: 7.33,
+    hydrationIndex: 55,
     fatigueIndex: null,
-    respirationRate: null,
-    bloodPressureSys: null,
-    bloodPressureDia: null,
+    respirationRate: 16,
+    bloodPressureSys: 118,
+    bloodPressureDia: 76,
     timestamp: new Date().toISOString(),
-    source: 'unavailable',
+    source: 'manual',
+    dataSource: 'demo',
+    connectionState: 'NOT_CONNECTED_DEMO',
   });
 
   const [environment, setEnvironment] = useState<EnvironmentalData>({
@@ -186,8 +190,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // 2. Fetch latest health summary if exists
       const healthSummary = await apiClient.health.getSummary();
-      if (healthSummary && healthSummary.data_available && healthSummary.latest) {
+
+      // Validate whether the backend reading contains real physiological data.
+      // A reading with heart_rate=0 or all-null fields is NOT real data.
+      const hasValidReading = (s: any): boolean => {
+        if (!s || !s.latest) return false;
+        const l = s.latest;
+        const hr = l.heart_rate;
+        const spo2 = l.spo2;
+        const steps = l.steps;
+        const temp = l.body_temperature;
+        const hasHR = typeof hr === 'number' && hr > 0 && hr < 300;
+        const hasSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
+        const hasSteps = typeof steps === 'number' && steps > 0;
+        const hasTemp = typeof temp === 'number' && temp > 30 && temp < 45;
+        return hasHR || hasSpO2 || hasSteps || hasTemp;
+      };
+
+      if (healthSummary && hasValidReading(healthSummary)) {
         const l = healthSummary.latest;
+        const sourceIsReal = l.source && !l.source.toLowerCase().includes('demo');
+
+        console.log('[LifeShield Health] Real health data found from backend:', {
+          source: l.source,
+          heart_rate: l.heart_rate,
+          spo2: l.spo2,
+          steps: l.steps,
+          temperature: l.body_temperature,
+        });
+
         setVitals(prev => ({
           ...prev,
           heartRate: l.heart_rate,
@@ -198,6 +229,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           bloodPressureDia: l.diastolic_bp,
           timestamp: l.timestamp,
           source: l.source || 'ble',
+          dataSource: sourceIsReal ? 'real' : 'demo',
+          lastSyncTime: new Date().toLocaleTimeString(),
+          connectionState: sourceIsReal ? 'CONNECTED_REAL_DATA' : 'NOT_CONNECTED_DEMO',
+        }));
+
+        console.log('[LifeShield Health] Using', sourceIsReal ? 'REAL' : 'DEMO', 'vitals');
+      } else {
+        if (healthSummary && healthSummary.latest) {
+          console.log('[LifeShield Health] Backend returned reading but it has no valid vital signs (e.g. heart_rate=0). Using DEMO.');
+        } else {
+          console.log('[LifeShield Health] No backend health data, using DEMO');
+        }
+        // No real data available - show demo for dashboard functionality
+        setVitals(prev => ({
+          ...prev,
+          heartRate: 72,
+          spO2: 98,
+          bodyTemperature: 36.6,
+          stepsCount: 4250,
+          sleepHours: 7.33,
+          activityLevel: 'light',
+          timestamp: new Date().toISOString(),
+          source: 'manual',
+          dataSource: 'demo',
+          lastSyncTime: new Date().toLocaleTimeString(),
+          connectionState: 'NOT_CONNECTED_DEMO',
         }));
       }
 
@@ -232,7 +289,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setBackendConnected(true);
     } catch (err) {
-      console.warn('Backend sync failed, running in local resilience mode:', err);
+      console.warn('[LifeShield Health] Backend sync failed, using existing vitals:', err);
+      console.log('[LifeShield Health] Data source: DEMO (backend unavailable)');
       setBackendConnected(false);
     }
   }, [selectedRegion]);
@@ -292,6 +350,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...partial,
         timestamp: new Date().toISOString(),
       };
+
+      // Validate whether incoming data contains real physiological values.
+      // A heart_rate of 0 or all-null fields is NOT real data.
+      const hasValidVitals = (data: Partial<VitalsData>): boolean => {
+        const hr = data.heartRate;
+        const spo2 = data.spO2;
+        const steps = data.stepsCount;
+        const temp = data.bodyTemperature;
+        const hasHR = typeof hr === 'number' && hr > 0 && hr < 300;
+        const hasSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
+        const hasSteps = typeof steps === 'number' && steps > 0;
+        const hasTemp = typeof temp === 'number' && temp > 30 && temp < 45;
+        return hasHR || hasSpO2 || hasSteps || hasTemp;
+      };
+
+      // Determine data source based on incoming source AND data validity
+      if (partial.source === 'ble' || partial.source === 'health_connect') {
+        if (hasValidVitals(partial)) {
+          next.dataSource = 'real';
+          next.connectionState = 'CONNECTED_REAL_DATA';
+        } else {
+          next.dataSource = 'demo';
+          next.connectionState = 'NOT_CONNECTED_DEMO';
+        }
+      } else if (partial.source === 'manual') {
+        // Manual entries from user form are real user-logged data
+        next.dataSource = 'real';
+        next.connectionState = 'CONNECTED_REAL_DATA';
+      }
+
+      console.log('[LifeShield Health] updateLiveVitals:', {
+        source: next.source,
+        dataSource: next.dataSource,
+        connectionState: next.connectionState,
+      });
 
       // Ingest to backend asynchronously
       if (next.heartRate || next.spO2 || next.stepsCount || next.bodyTemperature) {

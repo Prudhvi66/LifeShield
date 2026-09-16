@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..auth import get_current_user
+from ..auth import require_current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/api/health", tags=["Health & Vitals"])
@@ -17,9 +17,9 @@ router = APIRouter(prefix="/api/health", tags=["Health & Vitals"])
 def ingest_health_reading(
     payload: schemas.HealthReadingCreate,
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    user_id = current_user.id if current_user else None
+    user_id = current_user.id
 
     reading = models.HealthReading(
         user_id=user_id,
@@ -47,11 +47,9 @@ def ingest_health_reading(
 def list_health_readings(
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    query = db.query(models.HealthReading)
-    if current_user:
-        query = query.filter((models.HealthReading.user_id == current_user.id) | (models.HealthReading.user_id.is_(None)))
+    query = db.query(models.HealthReading).filter(models.HealthReading.user_id == current_user.id)
 
     readings = query.order_by(models.HealthReading.timestamp.desc()).limit(limit).all()
     return readings
@@ -60,11 +58,9 @@ def list_health_readings(
 @router.get("/summary", response_model=schemas.HealthSummaryOut)
 def get_health_summary(
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    query = db.query(models.HealthReading)
-    if current_user:
-        query = query.filter((models.HealthReading.user_id == current_user.id) | (models.HealthReading.user_id.is_(None)))
+    query = db.query(models.HealthReading).filter(models.HealthReading.user_id == current_user.id)
 
     latest = query.order_by(models.HealthReading.timestamp.desc()).first()
 
@@ -99,11 +95,9 @@ def get_health_summary(
 def get_health_trends(
     hours: int = Query(default=24, le=168),
     db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+    current_user: models.User = Depends(require_current_user)
 ):
-    query = db.query(models.HealthReading)
-    if current_user:
-        query = query.filter((models.HealthReading.user_id == current_user.id) | (models.HealthReading.user_id.is_(None)))
+    query = db.query(models.HealthReading).filter(models.HealthReading.user_id == current_user.id)
 
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     readings = query.filter(models.HealthReading.timestamp >= since).order_by(models.HealthReading.timestamp.asc()).all()

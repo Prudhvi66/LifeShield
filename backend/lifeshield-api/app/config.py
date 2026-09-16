@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = Field(default=None)
     openweather_api_key: Optional[str] = Field(default=None)
 
+    # Emergency Service Number (configurable, default 112)
+    emergency_service_number: str = Field(default="112")
+
     @property
     def telephony_configured(self) -> bool:
         return bool(self.twilio_account_sid and self.twilio_auth_token and self.twilio_from_number)

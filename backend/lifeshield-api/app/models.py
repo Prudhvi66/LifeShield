@@ -170,15 +170,22 @@ class SOSEvent(Base):
     device_id: Mapped[str | None] = mapped_column(String, ForeignKey("devices.id"), nullable=True)
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     address: Mapped[str | None] = mapped_column(String, nullable=True)
     tier_at_trigger: Mapped[str | None] = mapped_column(String, nullable=True)
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="pending")  # pending | dispatched | simulated | failed
-    channel: Mapped[str | None] = mapped_column(String, nullable=True)  # call | sms | call+sms
-    event_type: Mapped[str] = mapped_column(String, default="manual_sos")  # manual_sos | fall_detected
+    status: Mapped[str] = mapped_column(String, default="pending")
+    channel: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_type: Mapped[str] = mapped_column(String, default="manual_sos")
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     contacts_notified: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    emergency_service_number: Mapped[str | None] = mapped_column(String, nullable=True)
+    emergency_service_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    sms_delivery_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    call_status: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="sos_events")

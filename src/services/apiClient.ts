@@ -4,9 +4,21 @@
  * Configured via VITE_API_URL environment variable (default: http://localhost:8000).
  */
 
-const BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
-let activeBaseUrl = BASE_URL;
+const CUSTOM_URL_KEY = 'lifeshield_custom_api_url';
+const ENV_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
+const STORED_CUSTOM_URL = localStorage.getItem(CUSTOM_URL_KEY);
+let activeBaseUrl = (STORED_CUSTOM_URL || ENV_URL).replace(/\/+$/, '');
 const TOKEN_KEY = 'lifeshield_auth_token';
+
+// Allow additional fallback URLs to be configured via environment variable
+const FALLBACK_URLS_KEY = 'lifeshield_fallback_urls';
+let additionalFallbackUrls: string[] = [];
+try {
+  const stored = localStorage.getItem(FALLBACK_URLS_KEY);
+  if (stored) additionalFallbackUrls = JSON.parse(stored);
+} catch {
+  // ignore parse errors
+}
 
 class ApiClient {
   private token: string | null = null;
@@ -33,6 +45,30 @@ class ApiClient {
     return activeBaseUrl;
   }
 
+  public setCustomApiUrl(url: string) {
+    const cleaned = url.trim().replace(/\/+$/, '');
+    if (cleaned) {
+      localStorage.setItem(CUSTOM_URL_KEY, cleaned);
+      activeBaseUrl = cleaned;
+    } else {
+      localStorage.removeItem(CUSTOM_URL_KEY);
+      activeBaseUrl = ENV_URL;
+    }
+  }
+
+  public addFallbackUrl(url: string) {
+    const cleaned = url.trim().replace(/\/+$/, '');
+    if (cleaned && !additionalFallbackUrls.includes(cleaned)) {
+      additionalFallbackUrls.push(cleaned);
+      localStorage.setItem(FALLBACK_URLS_KEY, JSON.stringify(additionalFallbackUrls));
+    }
+  }
+
+  public clearFallbackUrls() {
+    additionalFallbackUrls = [];
+    localStorage.removeItem(FALLBACK_URLS_KEY);
+  }
+
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const ep = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
     const headers: Record<string, string> = {
@@ -44,8 +80,17 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    // Try current activeBaseUrl first
-    const urlsToTry = [activeBaseUrl];
+    const storedCustom = localStorage.getItem(CUSTOM_URL_KEY);
+
+    // Build URL candidates: stored custom, active, env, additional fallbacks, then localhost fallbacks
+    const urlsToTry = Array.from(new Set([
+      storedCustom,
+      activeBaseUrl,
+      ENV_URL,
+      ...additionalFallbackUrls,
+      'http://localhost:8000',
+      'http://127.0.0.1:8000',
+    ].filter(Boolean) as string[])).map(u => u.replace(/\/+$/, ''));
     let lastError: any = null;
     
     for (const baseUrl of urlsToTry) {
@@ -56,30 +101,51 @@ class ApiClient {
           headers,
         });
 
+        const rawText = await response.text();
+
+        let parsedJson: any = null;
+        let isJson = false;
+        if (rawText && rawText.trim()) {
+          try {
+            parsedJson = JSON.parse(rawText);
+            isJson = true;
+          } catch {
+            isJson = false;
+          }
+        }
+
         if (!response.ok) {
           let errorDetail = `HTTP ${response.status}: ${response.statusText}`;
-          try {
-            const errJson = await response.json();
-            if (errJson && errJson.detail) {
-              errorDetail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
-            }
-          } catch {
-            // ignore non-json error responses
+          if (isJson && parsedJson && parsedJson.detail) {
+            errorDetail = typeof parsedJson.detail === 'string' ? parsedJson.detail : JSON.stringify(parsedJson.detail);
+          } else if (rawText && (rawText.includes('<!DOCTYPE') || rawText.includes('<html'))) {
+            errorDetail = `Server returned HTTP ${response.status} HTML response. FastAPI backend may be offline or misconfigured at ${baseUrl}.`;
+          } else if (rawText) {
+            errorDetail = `HTTP ${response.status}: ${rawText.slice(0, 150)}`;
           }
           throw new Error(errorDetail);
         }
 
-        // Successfully reached backend, remember working base URL
+        // If status is 200 OK but response is HTML (e.g. Vite SPA fallback index.html), this is NOT the FastAPI backend
+        if (!isJson) {
+          throw new Error(`Invalid API response from ${url}: expected JSON but received HTML or plain text.`);
+        }
+
+        // Successfully reached backend and parsed valid JSON
         if (activeBaseUrl !== baseUrl) {
           activeBaseUrl = baseUrl;
           console.log(`[LifeShield API] Connected via ${activeBaseUrl}`);
         }
 
-        return (await response.json()) as T;
+        return parsedJson as T;
       } catch (err: any) {
         lastError = err;
-        // If it's a network failure (Failed to fetch), try next candidate
-        if (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError'))) {
+        // If network failure or hitting non-backend HTML server, try next URL candidate
+        if (err.message && (
+          err.message.includes('Failed to fetch') ||
+          err.message.includes('NetworkError') ||
+          err.message.includes('expected JSON but received HTML')
+        )) {
           continue;
         }
         // If server responded with an actual HTTP error code (e.g. 401, 404, 422), do not retry other servers
@@ -88,7 +154,14 @@ class ApiClient {
     }
 
     console.warn(`[LifeShield API Error] ${options.method || 'GET'} ${endpoint}:`, lastError?.message);
-    throw lastError || new Error('Backend unreachable across all endpoints');
+    throw lastError || new Error('LifeShield backend unreachable. Please ensure FastAPI backend is running on port 8000.');
+  }
+
+  /**
+   * Probes public backend /health endpoint without requiring authentication.
+   */
+  public async checkHealth(): Promise<{ status: string; service: string; version: string }> {
+    return this.request<{ status: string; service: string; version: string }>('/health');
   }
 
   // --- Authentication & User ---
@@ -231,12 +304,26 @@ class ApiClient {
       device_id?: string;
       lat?: number;
       lon?: number;
+      location_accuracy?: number;
+      location_timestamp?: string;
       address?: string;
       risk_tier?: string;
       risk_score?: number;
       contacts?: Array<{ name: string; phone: string }>;
+      emergency_message?: string;
     }) =>
       this.request<any>('/api/sos', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    cancel: (payload: {
+      device_id?: string;
+      lat?: number;
+      lon?: number;
+      location_accuracy?: number;
+      location_timestamp?: string;
+    }) =>
+      this.request<any>('/api/sos/cancel', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
