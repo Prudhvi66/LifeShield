@@ -8,6 +8,10 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(HealthConnectPlugin.class);
+        registerPlugin(EmergencyCallPlugin.class);
+        registerPlugin(EmergencySmsPlugin.class);
+        registerPlugin(TextToSpeechPlugin.class);
+        registerPlugin(LocationPlugin.class);
         super.onCreate(savedInstanceState);
         try {
             if (this.bridge != null && this.bridge.getWebView() != null) {

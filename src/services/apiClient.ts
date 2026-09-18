@@ -407,6 +407,33 @@ class ApiClient {
   public timeline = {
     get: (limit = 50) => this.request<any[]>(`/api/timeline?limit=${limit}`),
   };
+
+  // --- Emergency Dispatch Preferences ---
+  public dispatch = {
+    get: () => this.request<{
+      id: string;
+      user_id: string;
+      auto_call_police: boolean;
+      auto_call_ambulance: boolean;
+      police_number: string;
+      ambulance_number: string;
+      unified_emergency_number: string;
+      country: string;
+      updated_at: string;
+    }>('/api/dispatch'),
+    update: (payload: {
+      auto_call_police?: boolean;
+      auto_call_ambulance?: boolean;
+      police_number?: string;
+      ambulance_number?: string;
+      unified_emergency_number?: string;
+      country?: string;
+    }) =>
+      this.request<any>('/api/dispatch', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+  };
 }
 
 export const apiClient = new ApiClient();

@@ -459,3 +459,36 @@ class TimelineEventOut(BaseModel):
     description: str
     timestamp: datetime
     severity: str  # info | success | warning | emergency
+
+
+# --- Emergency Dispatch Preferences ---
+class EmergencyDispatchPreferenceCreate(BaseModel):
+    auto_call_police: bool = False
+    auto_call_ambulance: bool = False
+    police_number: str = "100"
+    ambulance_number: str = "108"
+    unified_emergency_number: str = "112"
+    country: str = "IN"
+
+
+class EmergencyDispatchPreferenceUpdate(BaseModel):
+    auto_call_police: Optional[bool] = None
+    auto_call_ambulance: Optional[bool] = None
+    police_number: Optional[str] = None
+    ambulance_number: Optional[str] = None
+    unified_emergency_number: Optional[str] = None
+    country: Optional[str] = None
+
+
+class EmergencyDispatchPreferenceOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: str
+    user_id: str
+    auto_call_police: bool
+    auto_call_ambulance: bool
+    police_number: str
+    ambulance_number: str
+    unified_emergency_number: str
+    country: str
+    updated_at: datetime

@@ -23,6 +23,8 @@ export interface TtsEvent {
   timestamp: number;
 }
 
+import { androidNotificationService, NotificationPermissionStatus } from './androidNotificationService';
+
 const VOICE_SETTINGS_KEY = 'lifeshield_voice_settings';
 const LOG_PREFIX = '[LifeShield TTS]';
 
@@ -302,7 +304,12 @@ class VoiceTtsService {
   /**
    * Get current notification permission status
    */
-  public getNotificationPermission(): 'granted' | 'denied' | 'default' | 'unsupported' {
+  public getNotificationPermission(): NotificationPermissionStatus {
+    if (androidNotificationService.isNativeAndroid()) {
+      // On Android, check asynchronously — return 'default' initially
+      // The real check happens async, but we need a sync initial value for UI
+      return 'default';
+    }
     if (typeof window === 'undefined' || !('Notification' in window)) {
       return 'unsupported';
     }
@@ -312,7 +319,12 @@ class VoiceTtsService {
   /**
    * Request notification permission (must be called from user gesture)
    */
-  public async requestNotificationPermission(): Promise<'granted' | 'denied' | 'default' | 'unsupported'> {
+  public async requestNotificationPermission(): Promise<NotificationPermissionStatus> {
+    if (androidNotificationService.isNativeAndroid()) {
+      const result = await androidNotificationService.requestPermission();
+      console.log(`${LOG_PREFIX} Android notification permission: ${result}`);
+      return result;
+    }
     if (typeof window === 'undefined' || !('Notification' in window)) {
       console.warn(`${LOG_PREFIX} Notifications not supported`);
       return 'unsupported';
@@ -332,6 +344,14 @@ class VoiceTtsService {
    * Send a browser notification
    */
   public sendBrowserNotification(title: string, body: string): boolean {
+    if (androidNotificationService.isNativeAndroid()) {
+      // Fire-and-forget native notification
+      androidNotificationService.sendNotification({ title, body }).catch((err) => {
+        console.warn(`${LOG_PREFIX} Native notification failed:`, err);
+      });
+      return true;
+    }
+
     if (typeof window === 'undefined' || !('Notification' in window)) {
       console.warn(`${LOG_PREFIX} Notifications not supported`);
       return false;

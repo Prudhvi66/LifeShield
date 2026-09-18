@@ -47,6 +47,7 @@ class User(Base):
     emergency_contacts: Mapped[list["EmergencyContact"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     sos_events: Mapped[list["SOSEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     voice_preferences: Mapped["VoicePreference"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    dispatch_preferences: Mapped["EmergencyDispatchPreference"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class UserBaseline(Base):
@@ -232,3 +233,19 @@ class VoicePreference(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     user: Mapped["User"] = relationship(back_populates="voice_preferences")
+
+
+class EmergencyDispatchPreference(Base):
+    __tablename__ = "emergency_dispatch_preferences"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), unique=True, nullable=False)
+    auto_call_police: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_call_ambulance: Mapped[bool] = mapped_column(Boolean, default=False)
+    police_number: Mapped[str] = mapped_column(String, default="100")
+    ambulance_number: Mapped[str] = mapped_column(String, default="108")
+    unified_emergency_number: Mapped[str] = mapped_column(String, default="112")
+    country: Mapped[str] = mapped_column(String, default="IN")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="dispatch_preferences")

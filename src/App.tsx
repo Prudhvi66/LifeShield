@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import "./index.css";
+import { Capacitor } from "@capacitor/core";
 import { apiClient } from "./services/apiClient";
 import { bluetoothService, BLEDeviceStatus } from "./services/bluetoothService";
 import { voiceTtsService, VoiceLanguage, VoiceSettings } from "./services/voiceTtsService";
@@ -8,6 +9,10 @@ import { soundService } from "./services/soundService";
 import { LocationService, GeoLocationResult, MedicalCenterPoint } from "./services/locationService";
 import { StorageService } from "./services/storageService";
 import { HealthConnectService } from "./services/healthConnectService";
+import { EmergencyCallService } from "./services/emergencyCallService";
+import { emergencySmsService, SmsSendResult } from "./services/emergencySmsService";
+import { AndroidLocationService } from "./services/androidLocationService";
+import { androidNotificationService, NotificationPermissionStatus } from "./services/androidNotificationService";
 import { LandingPage } from "./components/landing/LandingPage";
 import { RiskAnalysisView } from "./components/risk/RiskAnalysisView";
 import { WearablesView } from "./components/wearables/WearablesView";
@@ -176,6 +181,12 @@ export function App() {
     cancelled: boolean;
     contactsAttempted: number;
     sosEventId: string | null;
+    dispatchTarget?: string;
+    dispatchTargetNumber?: string;
+    callStatus?: string;
+    callResults?: Array<{ target: string; number: string; status: string; detail: string }>;
+    smsResults?: Array<{ target: string; number: string; status: string; detail: string }>;
+    smsStatus?: string;
   } | null>(null);
   const sosInProgressRef = useRef<boolean>(false);
 
@@ -187,6 +198,29 @@ export function App() {
   const [emergencyServiceNumber, setEmergencyServiceNumber] = useState<string>(
     () => localStorage.getItem("lifeshield_emergency_number") || "112"
   );
+
+  // Emergency Dispatch Preferences
+  const [dispatchPrefs, setDispatchPrefs] = useState<{
+    auto_call_police: boolean;
+    auto_call_ambulance: boolean;
+    police_number: string;
+    ambulance_number: string;
+    unified_emergency_number: string;
+  }>(() => {
+    const saved = localStorage.getItem("lifeshield_dispatch_prefs");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch { /* ignore */ }
+    }
+    return {
+      auto_call_police: false,
+      auto_call_ambulance: false,
+      police_number: "100",
+      ambulance_number: "108",
+      unified_emergency_number: "112",
+    };
+  });
 
   // AI Chat State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -228,7 +262,7 @@ export function App() {
   const [newReminderDosage, setNewReminderDosage] = useState("");
 
   // Reminder Scheduler Diagnostics
-  const [notifPermission, setNotifPermission] = useState<"granted" | "denied" | "default" | "unsupported">(() =>
+  const [notifPermission, setNotifPermission] = useState<NotificationPermissionStatus>(() =>
     voiceTtsService.getNotificationPermission()
   );
   const [schedulerActive, setSchedulerActive] = useState(false);
@@ -337,6 +371,20 @@ export function App() {
       window.removeEventListener("click", unlock);
       window.removeEventListener("touchstart", unlock);
     };
+  }, []);
+
+  // Check native Android notification permission on mount
+  useEffect(() => {
+    if (androidNotificationService.isNativeAndroid()) {
+      // Create channel and check permission on startup
+      androidNotificationService.ensurePermission().then((granted) => {
+        androidNotificationService.createChannel();
+        androidNotificationService.checkPermission().then((status) => {
+          setNotifPermission(status);
+          console.log("[LifeShield] Android notification permission:", status);
+        });
+      });
+    }
   }, []);
 
   // Update browser time every second for diagnostics
@@ -510,6 +558,18 @@ export function App() {
         setBaselineRestingHr(bl.resting_heart_rate || 72);
         setBaselineSpo2Floor(bl.normal_spo2_min || 95);
       }
+
+      // 8. Emergency Dispatch Preferences
+      const dp = await apiClient.dispatch.get().catch(() => null);
+      if (dp) {
+        setDispatchPrefs({
+          auto_call_police: dp.auto_call_police ?? false,
+          auto_call_ambulance: dp.auto_call_ambulance ?? false,
+          police_number: dp.police_number || "100",
+          ambulance_number: dp.ambulance_number || "108",
+          unified_emergency_number: dp.unified_emergency_number || "112",
+        });
+      }
     } catch (e) {
       console.warn("[LifeShield Health] Data loading error, keeping demo vitals:", e);
     } finally {
@@ -559,6 +619,24 @@ export function App() {
   // EMERGENCY SOS & FALL DETECTION ENGINE
   // -------------------------------------------------------------
   const requestBrowserGeolocation = (): Promise<{ lat: number; lon: number; accuracy: number; timestamp: string } | null> => {
+    // On Android, use native GPS for reliability
+    if (Capacitor.isNativePlatform()) {
+      return AndroidLocationService.getEmergencyLocation(8000)
+        .then((loc) => ({
+          lat: loc.latitude,
+          lon: loc.longitude,
+          accuracy: loc.accuracy,
+          timestamp: new Date(loc.timestamp).toISOString(),
+        }))
+        .catch((err) => {
+          console.warn("Native location failed, trying browser geolocation:", err);
+          return fallbackBrowserGeo();
+        });
+    }
+    return fallbackBrowserGeo();
+  };
+
+  const fallbackBrowserGeo = (): Promise<{ lat: number; lon: number; accuracy: number; timestamp: string } | null> => {
     return new Promise((resolve) => {
       if (!navigator.geolocation) {
         console.warn("Geolocation not supported by browser");
@@ -782,6 +860,9 @@ export function App() {
       cancelled: true,
       contactsAttempted: 0,
       sosEventId: null,
+      dispatchTarget: "Cancelled",
+      dispatchTargetNumber: "",
+      callStatus: "Cancelled by user",
     });
     setActiveModal("sos_status");
     showToast("SOS cancelled. You are safe.", "info");
@@ -800,13 +881,50 @@ export function App() {
     const emergencyMessage = buildEmergencyMessage(userName, gpsData);
 
     // Prepare status tracking
-    let primaryContactStatus = "Not configured";
-    let otherContactsStatus = "No other contacts";
-    let emergencyServiceStatus = "Not configured";
+    let dispatchTargetName = "Not configured";
+    let dispatchTargetNumber = "";
+    let callStatus = "Not attempted";
     let locationShared = false;
     let recordedToBackend = false;
     let sosEventId: string | null = null;
-    let contactsAttempted = 0;
+    const callResults: Array<{ target: string; number: string; status: string; detail: string }> = [];
+    const smsResults: Array<{ target: string; number: string; status: string; detail: string }> = [];
+
+    // Step 1: Determine dispatch targets based on user preferences
+    const targetsToCall: Array<{ target: string; number: string; name: string }> = [];
+
+    if (dispatchPrefs.auto_call_police) {
+      targetsToCall.push({
+        target: "Police",
+        number: dispatchPrefs.police_number,
+        name: `Police (${dispatchPrefs.police_number})`,
+      });
+    }
+
+    if (dispatchPrefs.auto_call_ambulance) {
+      targetsToCall.push({
+        target: "Ambulance",
+        number: dispatchPrefs.ambulance_number,
+        name: `Ambulance (${dispatchPrefs.ambulance_number})`,
+      });
+    }
+
+    // If neither police nor ambulance enabled, use primary emergency contact
+    if (targetsToCall.length === 0) {
+      const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
+      if (primaryContact) {
+        targetsToCall.push({
+          target: "PrimaryContact",
+          number: primaryContact.phone,
+          name: primaryContact.name,
+        });
+        dispatchTargetName = primaryContact.name;
+        dispatchTargetNumber = primaryContact.phone;
+      }
+    } else {
+      dispatchTargetName = targetsToCall.map((t) => t.name).join(", ");
+      dispatchTargetNumber = targetsToCall.map((t) => t.number).join(", ");
+    }
 
     // Step 2: Save SOS event to backend if authenticated
     if (apiClient.getToken()) {
@@ -824,72 +942,119 @@ export function App() {
         recordedToBackend = true;
         sosEventId = result.id || null;
 
-        // Parse per-contact status from backend response
-        if (result.contacts_notified && result.contacts_notified.length > 0) {
-          contactsAttempted = result.contacts_notified.length;
-          const primary = result.contacts_notified.find(
-            (c: any) => c.call?.status === "dispatched" || c.sms?.status === "dispatched"
-          );
-          if (primary) {
-            primaryContactStatus = `Attempted — SMS: ${primary.sms?.status || "N/A"}, Call: ${primary.call?.status || "N/A"}`;
-          } else {
-            const first = result.contacts_notified[0];
-            primaryContactStatus = `Attempted — SMS: ${first.sms?.status || "N/A"}, Call: ${first.call?.status || "N/A"}`;
-          }
-
-          if (result.contacts_notified.length > 1) {
-            const others = result.contacts_notified.slice(1);
-            const otherStatuses = others.map(
-              (c: any) => `${c.name}: SMS ${c.sms?.status || "N/A"}, Call ${c.call?.status || "N/A"}`
-            );
-            otherContactsStatus = otherStatuses.join("; ");
-          } else {
-            otherContactsStatus = "No other contacts";
-          }
-
-          if (gpsData) {
-            locationShared = true;
-          }
-
-          if (result.status === "simulated") {
-            emergencyServiceStatus = "NOT CONFIGURED (Twilio not set)";
-          } else {
-            emergencyServiceStatus = result.telephony_live ? "Attempted" : "NOT CONFIGURED";
-          }
-        } else {
-          primaryContactStatus = "No emergency contacts configured";
-          otherContactsStatus = "No contacts";
-          emergencyServiceStatus = "No contacts to notify";
+        if (gpsData) {
+          locationShared = true;
         }
       } catch (err: any) {
-        console.error("SOS backend dispatch error:", err);
+        console.error("SOS backend record error:", err);
         recordedToBackend = false;
-        primaryContactStatus = "Backend error: " + (err.message || "Unknown");
       }
-    } else {
-      primaryContactStatus = "Not authenticated — SOS not saved to backend";
     }
 
-    // Step 3: Open browser fallbacks if telephony not configured
-    if (primaryContactStatus.includes("simulated") || primaryContactStatus.includes("NOT CONFIGURED") || !apiClient.getToken()) {
-      const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
-      if (primaryContact) {
-        const smsUrl = `sms:${primaryContact.phone}?body=${encodeURIComponent(emergencyMessage)}`;
-        try {
-          window.location.href = smsUrl;
-          primaryContactStatus += " | SMS composer opened (browser fallback)";
-        } catch {
-          primaryContactStatus += " | SMS composer not available on this device";
+    // Step 3: Place automatic calls using native Android plugin or show web limitation
+    if (targetsToCall.length > 0) {
+      // Deduplicate: only call each unique number once
+      const uniqueNumbers = new Set<string>();
+
+      for (const target of targetsToCall) {
+        if (uniqueNumbers.has(target.number)) continue;
+        uniqueNumbers.add(target.number);
+
+        const result = await EmergencyCallService.callNumber(target.number);
+
+        callResults.push({
+          target: target.target,
+          number: target.number,
+          status: result.success ? "Call initiated" : "Call failed",
+          detail: result.message,
+        });
+
+        if (result.success) {
+          callStatus = "Call initiated";
+        } else if (result.requiresPermission) {
+          callStatus = "Permission required";
+        } else if (result.platform === "web") {
+          callStatus = "Android app required for auto-calling";
+        } else {
+          callStatus = "Call failed: " + result.message;
+        }
+
+        // Small delay between sequential calls to avoid overwhelming the phone
+        if (targetsToCall.indexOf(target) < targetsToCall.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
         }
       }
+    } else {
+      callStatus = "No dispatch target configured";
     }
 
-    // Step 4: Show clear final status
+    // Step 3b: Send emergency SMS using native Android plugin (independent of calls)
+    if (targetsToCall.length > 0) {
+      const uniqueNumbersSms = new Set<string>();
+
+      for (const target of targetsToCall) {
+        if (uniqueNumbersSms.has(target.number)) continue;
+        uniqueNumbersSms.add(target.number);
+
+        const smsResult = await emergencySmsService.sendSms(target.number, emergencyMessage);
+
+        smsResults.push({
+          target: target.target,
+          number: target.number,
+          status: smsResult.success ? "SMS sent" : "SMS failed",
+          detail: smsResult.message || (smsResult.error || "Unknown error"),
+        });
+      }
+    }
+
+    // Step 4: Build and show SOS status
+    const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
+    const primaryContactStatus = callResults.find((r) => r.target === "PrimaryContact")
+      ? `${callResults.find((r) => r.target === "PrimaryContact")!.status}: ${callResults.find((r) => r.target === "PrimaryContact")!.detail}`
+      : targetsToCall.some((t) => t.target === "PrimaryContact")
+        ? "No primary contact configured"
+        : "Not selected (Police/Ambulance enabled)";
+
+    const policeStatus = callResults.find((r) => r.target === "Police")
+      ? `${callResults.find((r) => r.target === "Police")!.status}: ${callResults.find((r) => r.target === "Police")!.detail}`
+      : dispatchPrefs.auto_call_police
+        ? "Not attempted"
+        : "Not enabled by user";
+
+    const ambulanceStatus = callResults.find((r) => r.target === "Ambulance")
+      ? `${callResults.find((r) => r.target === "Ambulance")!.status}: ${callResults.find((r) => r.target === "Ambulance")!.detail}`
+      : dispatchPrefs.auto_call_ambulance
+        ? "Not attempted"
+        : "Not enabled by user";
+
     const statusMessage = recordedToBackend
       ? (gpsData
-        ? "Emergency SOS recorded with GPS location. Check status below."
+        ? "Emergency SOS recorded with GPS location. Check dispatch status below."
         : "Emergency SOS recorded. Location was unavailable.")
       : "Emergency SOS processed locally. Backend not available or not authenticated.";
+
+    // Build SMS status summary
+    const primaryContactSmsStatus = smsResults.find((r) => r.target === "PrimaryContact")
+      ? `${smsResults.find((r) => r.target === "PrimaryContact")!.status}: ${smsResults.find((r) => r.target === "PrimaryContact")!.detail}`
+      : targetsToCall.some((t) => t.target === "PrimaryContact")
+        ? "SMS not sent"
+        : "Not selected (Police/Ambulance enabled)";
+
+    const policeSmsStatus = smsResults.find((r) => r.target === "Police")
+      ? `${smsResults.find((r) => r.target === "Police")!.status}: ${smsResults.find((r) => r.target === "Police")!.detail}`
+      : dispatchPrefs.auto_call_police
+        ? "SMS not sent"
+        : "Not enabled by user";
+
+    const ambulanceSmsStatus = smsResults.find((r) => r.target === "Ambulance")
+      ? `${smsResults.find((r) => r.target === "Ambulance")!.status}: ${smsResults.find((r) => r.target === "Ambulance")!.detail}`
+      : dispatchPrefs.auto_call_ambulance
+        ? "SMS not sent"
+        : "Not enabled by user";
+
+    const overallSmsStatus = smsResults.length > 0
+      ? smsResults.map((r) => `${r.target}: ${r.status}`).join("; ")
+      : "No SMS targets";
 
     setSosStatus({
       recorded: recordedToBackend,
@@ -899,23 +1064,25 @@ export function App() {
       lat: gpsData?.lat || null,
       lon: gpsData?.lon || null,
       primaryContactStatus,
-      otherContactsStatus,
-      emergencyServiceStatus,
+      otherContactsStatus: callResults.length > 1
+        ? callResults.slice(1).map((r) => `${r.target}: ${r.status}`).join("; ")
+        : "No other targets",
+      emergencyServiceStatus: `${policeStatus} | ${ambulanceStatus}`,
       locationShared,
       message: statusMessage,
       cancelled: false,
-      contactsAttempted,
+      contactsAttempted: callResults.length,
       sosEventId,
+      dispatchTarget: dispatchTargetName,
+      dispatchTargetNumber,
+      callStatus,
+      callResults,
+      smsResults,
+      smsStatus: overallSmsStatus,
     });
 
     sosInProgressRef.current = false;
     setActiveModal("sos_status");
-
-    // Step 5: Offer to call emergency contact
-    const primaryContact = contacts.find((c) => c.priority === 1) || contacts[0];
-    if (primaryContact && !primaryContactStatus.includes("No emergency contacts")) {
-      showToast(`Tap to call ${primaryContact.name} (${primaryContact.phone})`, "warning");
-    }
   };
 
   // -------------------------------------------------------------
@@ -1952,7 +2119,7 @@ export function App() {
             <div style={{ display: "flex", gap: "8px", marginBottom: "12px", alignItems: "center", flexWrap: "wrap" }}>
               <span style={{ fontSize: "11px", color: "#6a6486", fontWeight: 600 }}>Voice: {voiceSettings.masterVoiceEnabled ? "ON" : "OFF"}</span>
               <span style={{ fontSize: "11px", color: notifPermission === "granted" ? "#38a169" : notifPermission === "denied" ? "#e53e3e" : "#d69e2e", fontWeight: 600 }}>
-                Notifications: {notifPermission === "granted" ? "Allowed" : notifPermission === "denied" ? "Denied" : notifPermission === "unsupported" ? "Unsupported" : "Not granted"}
+                Notifications: {notifPermission === "granted" ? "Enabled" : notifPermission === "denied" ? "Permission Required" : notifPermission === "unsupported" ? "Unsupported" : "Not Enabled"}
               </span>
               <button
                 type="button"
@@ -1982,16 +2149,26 @@ export function App() {
                 className="ls-btn-secondary"
                 style={{ padding: "5px 10px", fontSize: "11px", background: notifPermission === "granted" ? "#c6f6d5" : "#fefcbf" }}
                 onClick={async () => {
-                  const result = await voiceTtsService.requestNotificationPermission();
-                  setNotifPermission(result);
-                  if (result === "denied") {
-                    showToast("Browser notifications are blocked. You can still use LifeShield voice reminders.", "warning");
-                  } else if (result === "granted") {
-                    showToast("Notifications enabled!", "success");
+                  if (androidNotificationService.isNativeAndroid()) {
+                    const result = await androidNotificationService.requestPermission();
+                    setNotifPermission(result);
+                    if (result === "granted") {
+                      showToast("Android notifications enabled!", "success");
+                    } else {
+                      showToast("Notification permission denied. Enable in Android Settings > Apps > LifeShield > Notifications.", "warning");
+                    }
+                  } else {
+                    const result = await voiceTtsService.requestNotificationPermission();
+                    setNotifPermission(result);
+                    if (result === "denied") {
+                      showToast("Browser notifications are blocked. You can still use LifeShield voice reminders.", "warning");
+                    } else if (result === "granted") {
+                      showToast("Notifications enabled!", "success");
+                    }
                   }
                 }}
               >
-                Enable Notifications
+                {notifPermission === "granted" ? "Notifications Enabled" : "Enable Notifications"}
               </button>
             </div>
 
@@ -2847,17 +3024,17 @@ export function App() {
               {/* Status rows */}
               {[
                 {
-                  label: "SOS Event Recorded",
+                  label: "SOS Event",
                   value: sosStatus.recorded
-                    ? `✓ Yes${sosStatus.sosEventId ? ` (ID: ${sosStatus.sosEventId.slice(0, 8)}...)` : ""}`
+                    ? `✓ Recorded${sosStatus.sosEventId ? ` (${sosStatus.sosEventId.slice(0, 8)}...)` : ""}`
                     : "✗ Not recorded (backend unavailable or not authenticated)",
                   ok: sosStatus.recorded,
                 },
                 {
                   label: "GPS Location",
                   value: sosStatus.locationObtained
-                    ? `✓ Obtained (±${Math.round(sosStatus.locationAccuracy || 0)}m accuracy)`
-                    : "⚠ Location unavailable (permission denied or not supported)",
+                    ? `✓ Obtained (±${Math.round(sosStatus.locationAccuracy || 0)}m)`
+                    : "⚠ Unavailable",
                   ok: sosStatus.locationObtained,
                 },
                 ...(sosStatus.lat && sosStatus.lon ? [{
@@ -2866,18 +3043,28 @@ export function App() {
                   ok: true,
                 }] : []),
                 {
-                  label: "Primary Emergency Contact",
-                  value: sosStatus.primaryContactStatus,
-                  ok: sosStatus.primaryContactStatus.includes("dispatched") || sosStatus.primaryContactStatus.includes("Attempted"),
+                  label: "Dispatch Target",
+                  value: sosStatus.dispatchTarget || "Not configured",
+                  ok: !!sosStatus.dispatchTarget,
+                },
+                ...(sosStatus.dispatchTargetNumber ? [{
+                  label: "Phone Number",
+                  value: sosStatus.dispatchTargetNumber,
+                  ok: true,
+                }] : []),
+                {
+                  label: "Call Status",
+                  value: sosStatus.callStatus || "Not attempted",
+                  ok: sosStatus.callStatus?.includes("initiated") || false,
                 },
                 {
-                  label: "Other Emergency Contacts",
-                  value: sosStatus.otherContactsStatus,
-                  ok: sosStatus.otherContactsStatus.includes("Attempted"),
+                  label: "Police",
+                  value: sosStatus.emergencyServiceStatus?.split("|")[0]?.trim() || "Not enabled",
+                  ok: false,
                 },
                 {
-                  label: "Emergency Service",
-                  value: sosStatus.emergencyServiceStatus,
+                  label: "Ambulance",
+                  value: sosStatus.emergencyServiceStatus?.split("|")[1]?.trim() || "Not enabled",
                   ok: false,
                 },
                 {
@@ -2885,6 +3072,16 @@ export function App() {
                   value: sosStatus.locationShared ? "✓ Yes (included in emergency message)" : "✗ No",
                   ok: sosStatus.locationShared,
                 },
+                ...(sosStatus.smsResults && sosStatus.smsResults.length > 0 ? [{
+                  label: "SMS Status",
+                  value: sosStatus.smsStatus || "Not sent",
+                  ok: sosStatus.smsResults.some(r => r.status.includes("sent")),
+                }] : []),
+                ...(sosStatus.smsResults && sosStatus.smsResults.length > 0 ? sosStatus.smsResults.map((sms, idx) => ({
+                  label: `SMS ${idx + 1} (${sms.target})`,
+                  value: `${sms.status}: ${sms.detail}`,
+                  ok: sms.status.includes("sent"),
+                })) : []),
               ].map((row, i) => (
                 <div key={i} style={{
                   display: "flex",
@@ -2907,21 +3104,21 @@ export function App() {
 
               {/* Action buttons */}
               <div style={{ display: "flex", gap: "10px", marginTop: "16px", flexWrap: "wrap" }}>
-                {contacts.length > 0 && !sosStatus.cancelled && (
+                {sosStatus.dispatchTargetNumber && !sosStatus.cancelled && (
                   <a
-                    href={`tel:${contacts.find((c) => c.priority === 1)?.phone || contacts[0]?.phone}`}
+                    href={`tel:${sosStatus.dispatchTargetNumber.split(",")[0].trim()}`}
                     className="ls-btn-danger"
                     style={{ flex: 1, textAlign: "center", textDecoration: "none", padding: "10px", fontSize: "12px" }}
                   >
-                    Call Primary Contact
+                    Call {sosStatus.dispatchTarget || "Emergency"}
                   </a>
                 )}
                 <a
-                  href={`tel:${emergencyServiceNumber}`}
+                  href={`tel:${dispatchPrefs.unified_emergency_number}`}
                   className="ls-btn-danger"
                   style={{ flex: 1, textAlign: "center", textDecoration: "none", padding: "10px", fontSize: "12px" }}
                 >
-                  Call {emergencyServiceNumber} (Emergency Service)
+                  Call {dispatchPrefs.unified_emergency_number} (Unified Emergency)
                 </a>
                 {sosStatus.lat && sosStatus.lon && (
                   <a
@@ -2953,40 +3150,177 @@ export function App() {
         </div>
       )}
 
-      {/* 13. EMERGENCY SERVICE SETTINGS MODAL */}
+      {/* 13. EMERGENCY DISPATCH SETTINGS MODAL */}
       {activeModal === "emergency_settings" && (
         <div className="ls-modal-overlay" onClick={() => setActiveModal("none")}>
           <div className="ls-modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="ls-modal-header">
-              <h3>Emergency Service Configuration</h3>
+              <h3>Emergency Dispatch Settings</h3>
               <button className="ls-close-btn" onClick={() => setActiveModal("none")}>✕</button>
             </div>
 
             <div style={{ textAlign: "left", fontSize: "12px", color: "#47415e" }}>
-              <p style={{ marginBottom: "12px", color: "#6a6486" }}>
-                Configure the emergency/ambulance phone number. This number is shown during SOS activation and can be called directly.
+              <p style={{ marginBottom: "14px", color: "#6a6486", fontSize: "11px" }}>
+                Configure which emergency services LifeShield will automatically contact during SOS.
+                Enable only the services you want called automatically.
               </p>
 
-              <div style={{ marginBottom: "12px" }}>
-                <label style={{ fontWeight: 600, display: "block", marginBottom: "6px" }}>
-                  Emergency Service Number
+              {/* Primary Emergency Contact Display */}
+              <div style={{
+                background: "#f0fdf4",
+                border: "1px solid #bbf7d0",
+                padding: "12px 14px",
+                borderRadius: "14px",
+                marginBottom: "14px",
+              }}>
+                <div style={{ fontWeight: 700, color: "#166534", marginBottom: "4px" }}>Primary Emergency Contact</div>
+                {contacts.length > 0 ? (
+                  <>
+                    <div style={{ color: "#15803d" }}>
+                      {contacts.find((c) => c.priority === 1)?.name || contacts[0]?.name}
+                    </div>
+                    <div style={{ color: "#16a34a", fontSize: "11px" }}>
+                      {contacts.find((c) => c.priority === 1)?.phone || contacts[0]?.phone}
+                    </div>
+                    <div style={{ fontSize: "10px", color: "#6a6486", marginTop: "4px" }}>
+                      Called automatically when neither Police nor Ambulance is enabled.
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ color: "#b45309" }}>No emergency contacts configured. Add contacts in the Emergency Contacts section.</div>
+                )}
+              </div>
+
+              {/* Emergency Services Section */}
+              <div style={{ fontWeight: 700, color: "#342f4c", marginBottom: "10px", fontSize: "13px" }}>
+                Emergency Services
+              </div>
+
+              {/* Police Toggle */}
+              <div style={{
+                background: dispatchPrefs.auto_call_police ? "#eff6ff" : "#f9fafb",
+                border: `1px solid ${dispatchPrefs.auto_call_police ? "#bfdbfe" : "#e5e7eb"}`,
+                padding: "12px 14px",
+                borderRadius: "14px",
+                marginBottom: "10px",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, color: "#1e3a5f" }}>Automatically call Police</div>
+                    <div style={{ fontSize: "10px", color: "#6b7280" }}>During SOS, call the configured police number</div>
+                  </div>
+                  <label style={{ position: "relative", display: "inline-block", width: "44px", height: "24px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={dispatchPrefs.auto_call_police}
+                      onChange={(e) => setDispatchPrefs((p) => ({ ...p, auto_call_police: e.target.checked }))}
+                      style={{ opacity: 0, width: 0, height: 0 }}
+                    />
+                    <span style={{
+                      position: "absolute", inset: 0, borderRadius: "24px",
+                      background: dispatchPrefs.auto_call_police ? "#2563eb" : "#d1d5db",
+                      transition: "background 0.2s",
+                    }} />
+                    <span style={{
+                      position: "absolute", top: "2px", left: dispatchPrefs.auto_call_police ? "22px" : "2px",
+                      width: "20px", height: "20px", borderRadius: "50%",
+                      background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                    }} />
+                  </label>
+                </div>
+                {dispatchPrefs.auto_call_police && (
+                  <div style={{ marginTop: "6px" }}>
+                    <label style={{ fontSize: "10px", fontWeight: 600, color: "#374151" }}>Police Number</label>
+                    <input
+                      type="tel"
+                      className="ls-input"
+                      value={dispatchPrefs.police_number}
+                      onChange={(e) => setDispatchPrefs((p) => ({ ...p, police_number: e.target.value }))}
+                      placeholder="100"
+                      style={{ width: "100%", marginTop: "4px", fontSize: "12px" }}
+                    />
+                    <div style={{ fontSize: "9px", color: "#6b7280", marginTop: "2px" }}>
+                      India Police: 100 (legacy) | Unified: 112
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Ambulance Toggle */}
+              <div style={{
+                background: dispatchPrefs.auto_call_ambulance ? "#fef2f2" : "#f9fafb",
+                border: `1px solid ${dispatchPrefs.auto_call_ambulance ? "#fecaca" : "#e5e7eb"}`,
+                padding: "12px 14px",
+                borderRadius: "14px",
+                marginBottom: "10px",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, color: "#7f1d1d" }}>Automatically call Ambulance</div>
+                    <div style={{ fontSize: "10px", color: "#6b7280" }}>During SOS, call the configured ambulance number</div>
+                  </div>
+                  <label style={{ position: "relative", display: "inline-block", width: "44px", height: "24px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={dispatchPrefs.auto_call_ambulance}
+                      onChange={(e) => setDispatchPrefs((p) => ({ ...p, auto_call_ambulance: e.target.checked }))}
+                      style={{ opacity: 0, width: 0, height: 0 }}
+                    />
+                    <span style={{
+                      position: "absolute", inset: 0, borderRadius: "24px",
+                      background: dispatchPrefs.auto_call_ambulance ? "#dc2626" : "#d1d5db",
+                      transition: "background 0.2s",
+                    }} />
+                    <span style={{
+                      position: "absolute", top: "2px", left: dispatchPrefs.auto_call_ambulance ? "22px" : "2px",
+                      width: "20px", height: "20px", borderRadius: "50%",
+                      background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                    }} />
+                  </label>
+                </div>
+                {dispatchPrefs.auto_call_ambulance && (
+                  <div style={{ marginTop: "6px" }}>
+                    <label style={{ fontSize: "10px", fontWeight: 600, color: "#374151" }}>Ambulance Number</label>
+                    <input
+                      type="tel"
+                      className="ls-input"
+                      value={dispatchPrefs.ambulance_number}
+                      onChange={(e) => setDispatchPrefs((p) => ({ ...p, ambulance_number: e.target.value }))}
+                      placeholder="108"
+                      style={{ width: "100%", marginTop: "4px", fontSize: "12px" }}
+                    />
+                    <div style={{ fontSize: "9px", color: "#6b7280", marginTop: "2px" }}>
+                      India Ambulance: 108 | Unified: 112
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Unified Emergency Number */}
+              <div style={{
+                background: "#f9fafb",
+                border: "1px solid #e5e7eb",
+                padding: "12px 14px",
+                borderRadius: "14px",
+                marginBottom: "14px",
+              }}>
+                <label style={{ fontSize: "11px", fontWeight: 600, color: "#374151", display: "block", marginBottom: "6px" }}>
+                  Unified Emergency Number
                 </label>
                 <input
                   type="tel"
                   className="ls-input"
-                  value={emergencyServiceNumber}
-                  onChange={(e) => {
-                    setEmergencyServiceNumber(e.target.value);
-                    localStorage.setItem("lifeshield_emergency_number", e.target.value);
-                  }}
-                  placeholder="e.g. 112, 108, 911"
-                  style={{ width: "100%" }}
+                  value={dispatchPrefs.unified_emergency_number}
+                  onChange={(e) => setDispatchPrefs((p) => ({ ...p, unified_emergency_number: e.target.value }))}
+                  placeholder="112"
+                  style={{ width: "100%", fontSize: "12px" }}
                 />
-                <div style={{ fontSize: "10px", color: "#8d87a4", marginTop: "4px" }}>
-                  Default: 112 (India National Emergency). Common numbers: 108 (Ambulance), 100 (Police), 101 (Fire), 911 (US).
+                <div style={{ fontSize: "9px", color: "#6b7280", marginTop: "4px" }}>
+                  India National Unified Emergency: 112 (always available as manual fallback)
                 </div>
               </div>
 
+              {/* Info Box */}
               <div style={{
                 background: "#f8f6fd",
                 padding: "10px 14px",
@@ -2994,19 +3328,30 @@ export function App() {
                 marginBottom: "14px",
                 fontSize: "11px",
               }}>
-                <strong>Important:</strong> LifeShield does NOT dispatch emergency services automatically. This number provides a direct call action during SOS activation. For actual ambulance dispatch, call the number directly or use your local emergency services.
+                <strong>How it works:</strong> When you trigger SOS, LifeShield will automatically call the numbers you have enabled above.
+                If neither Police nor Ambulance is enabled, your Primary Emergency Contact will be called automatically.
+                The unified emergency number (112) is always available as a manual fallback button.
               </div>
 
               <button
                 className="ls-btn-primary"
                 style={{ width: "100%" }}
-                onClick={() => {
-                  localStorage.setItem("lifeshield_emergency_number", emergencyServiceNumber);
-                  showToast(`Emergency service number saved: ${emergencyServiceNumber}`, "success");
+                onClick={async () => {
+                  // Save to backend if authenticated
+                  if (apiClient.getToken()) {
+                    try {
+                      await apiClient.dispatch.update(dispatchPrefs);
+                    } catch (err) {
+                      console.warn("Failed to save dispatch preferences to backend:", err);
+                    }
+                  }
+                  // Always save locally
+                  localStorage.setItem("lifeshield_dispatch_prefs", JSON.stringify(dispatchPrefs));
+                  showToast("Emergency dispatch settings saved.", "success");
                   setActiveModal("none");
                 }}
               >
-                Save Configuration
+                Save Dispatch Settings
               </button>
             </div>
           </div>

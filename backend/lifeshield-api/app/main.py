@@ -14,6 +14,7 @@ from .routers import (
     auth,
     contacts,
     devices,
+    dispatch,
     emergency,
     environment,
     health,
@@ -106,6 +107,7 @@ app.include_router(environment.router)
 app.include_router(risk.router)
 app.include_router(ai.router)
 app.include_router(timeline.router)
+app.include_router(dispatch.router)
 
 
 # Log full route table on import (visible in --reload output)

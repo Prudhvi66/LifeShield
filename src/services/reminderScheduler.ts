@@ -5,6 +5,7 @@
  */
 
 import { voiceTtsService } from './voiceTtsService';
+import { AndroidTtsService } from './androidTtsService';
 
 export interface SchedulerReminder {
   id: string;
@@ -193,9 +194,9 @@ class ReminderScheduler {
         `${r.title}${r.dosage ? ' - ' + r.dosage : ''}`
       );
 
-      // TTS
+      // TTS - use native Android TTS when available
       if (r.voice_enabled !== false) {
-        voiceTtsService.speakReminder({
+        AndroidTtsService.speakReminder({
           title: r.title,
           dosage: r.dosage,
           reminderType: r.reminder_type,
@@ -344,11 +345,11 @@ class ReminderScheduler {
       `${title}${dosage ? ' - ' + dosage : ''}`
     );
 
-    voiceTtsService.speakReminder({
+    AndroidTtsService.speakReminder({
       title,
       dosage,
       reminderType: reminderType || 'Medicine',
-      force: true,
+      masterVoiceEnabled: true,
     });
 
     this.emit({
