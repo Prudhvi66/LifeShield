@@ -13,6 +13,7 @@ import { EmergencyCallService } from "./services/emergencyCallService";
 import { emergencySmsService, SmsSendResult } from "./services/emergencySmsService";
 import { AndroidLocationService } from "./services/androidLocationService";
 import { androidNotificationService, NotificationPermissionStatus } from "./services/androidNotificationService";
+import { nativeFallDetection } from "./services/nativeFallDetectionService";
 import { LandingPage } from "./components/landing/LandingPage";
 import { RiskAnalysisView } from "./components/risk/RiskAnalysisView";
 import { WearablesView } from "./components/wearables/WearablesView";
@@ -157,7 +158,13 @@ export function App() {
   const [dataSource, setDataSource] = useState<"real" | "demo" | "mixed">("demo");
 
   // Fall Detection & Emergency Countdown
-  const [fallDetectionActive, setFallDetectionActive] = useState(true);
+  const [fallDetectionActive, setFallDetectionActive] = useState(() => {
+    // Restore persisted state, default OFF
+    try {
+      const saved = localStorage.getItem("lifeshield_fall_detection_active");
+      return saved === "true";
+    } catch { return false; }
+  });
   const [emergencyCountdown, setEmergencyCountdown] = useState<number>(10);
   const [fallSirenCountdown, setFallSirenCountdown] = useState<number>(30);
   const [highHrCountdown, setHighHrCountdown] = useState<number>(30);
@@ -616,6 +623,28 @@ export function App() {
   }, [loadData, fallDetectionActive]);
 
   // -------------------------------------------------------------
+  // NATIVE FALL DETECTION SERVICE LIFECYCLE
+  // Start/stop the foreground service when the persisted state changes
+  // -------------------------------------------------------------
+  useEffect(() => {
+    if (!nativeFallDetection.isNativeAndroid()) return;
+
+    if (fallDetectionActive) {
+      nativeFallDetection.isRunning().then((running) => {
+        if (!running) {
+          nativeFallDetection.start();
+        }
+      });
+    } else {
+      nativeFallDetection.isRunning().then((running) => {
+        if (running) {
+          nativeFallDetection.stop();
+        }
+      });
+    }
+  }, [fallDetectionActive]);
+
+  // -------------------------------------------------------------
   // EMERGENCY SOS & FALL DETECTION ENGINE
   // -------------------------------------------------------------
   const requestBrowserGeolocation = (): Promise<{ lat: number; lon: number; accuracy: number; timestamp: string } | null> => {
@@ -780,6 +809,31 @@ export function App() {
       });
     }, 1000);
   };
+
+  // -------------------------------------------------------------
+  // NATIVE FALL DETECTION LISTENER (foreground service events)
+  // Must be defined after triggerFallSirenModal
+  // -------------------------------------------------------------
+  useEffect(() => {
+    if (!nativeFallDetection.isNativeAndroid()) return;
+
+    // Check for pending fall event from a cold start (notification tap)
+    nativeFallDetection.getPendingFall().then((pending) => {
+      if (pending && pending.hasPending) {
+        console.log("[LifeShield] Pending native fall detected on cold start — peakG:", pending.peakG);
+        triggerFallSirenModal();
+      }
+    });
+
+    const listener = nativeFallDetection.onFallDetected((data) => {
+      console.log("[LifeShield] Native fall detected — peakG:", data.peakG, "source:", data.source);
+      triggerFallSirenModal();
+    });
+
+    return () => {
+      listener.remove();
+    };
+  }, [triggerFallSirenModal]);
 
   const triggerHighHrAlertModal = (hrValue: number) => {
     if (sosInProgressRef.current) return;
@@ -1837,7 +1891,20 @@ export function App() {
             onToggleFallDetection={() => {
               const next = !fallDetectionActive;
               setFallDetectionActive(next);
-              showToast(`Hardware fall detection ${next ? "activated" : "paused"}.`, "info");
+              try { localStorage.setItem("lifeshield_fall_detection_active", String(next)); } catch {}
+              // Start/stop native foreground service for background fall detection
+              if (next) {
+                nativeFallDetection.start().then((started) => {
+                  if (started) {
+                    showToast("Fall detection activated — monitoring continues in background.", "success");
+                  } else {
+                    showToast("Hardware fall detection activated (foreground only).", "info");
+                  }
+                });
+              } else {
+                nativeFallDetection.stop();
+                showToast("Hardware fall detection paused.", "info");
+              }
             }}
             onStartSos={startSosCountdown}
             onTestFall={triggerFallSirenModal}
@@ -3866,7 +3933,7 @@ function SafetyScreen({
       <PageHeading
         label="EMERGENCY DISPATCH"
         title="You're protected"
-        description="Hardware motion fall detection, live GPS coordinates, and automated emergency contacts."
+        description="Hardware fall detection (works in background), live GPS coordinates, and automated emergency contacts."
       />
 
       {/* EMERGENCY SOS CARD */}
@@ -3913,12 +3980,79 @@ function SafetyScreen({
           onClick={onRefreshLocation}
         />
 
-        <SafetyOption
-          icon="🏃"
-          title={`Fall detection: ${fallDetectionActive ? "Active" : "Paused"}`}
-          description={`Monitors accelerometer spike (>25 m/s²). Tap to ${fallDetectionActive ? "pause" : "activate"}.`}
+        {/* FALL DETECTION TOGGLE CARD */}
+        <div
+          style={{
+            background: fallDetectionActive
+              ? "linear-gradient(135deg, #065f46, #047857)"
+              : "linear-gradient(135deg, #4a4458, #6a6486)",
+            borderRadius: "18px",
+            padding: "16px 18px",
+            marginBottom: "12px",
+            color: "#fff",
+            cursor: "pointer",
+            border: fallDetectionActive ? "2px solid #34d399" : "2px solid #8880a0",
+            transition: "all 0.3s ease",
+          }}
           onClick={onToggleFallDetection}
-        />
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onToggleFallDetection(); }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <span style={{ fontSize: "22px" }}>🏃</span>
+              <div>
+                <strong style={{ fontSize: "14px", fontWeight: 700 }}>Fall Detection</strong>
+              </div>
+            </div>
+            {/* Toggle switch */}
+            <div
+              style={{
+                width: "52px",
+                height: "28px",
+                borderRadius: "14px",
+                background: fallDetectionActive ? "#34d399" : "#555",
+                position: "relative",
+                transition: "background 0.3s ease",
+                flexShrink: 0,
+              }}
+            >
+              <div
+                style={{
+                  width: "22px",
+                  height: "22px",
+                  borderRadius: "50%",
+                  background: "#fff",
+                  position: "absolute",
+                  top: "3px",
+                  left: fallDetectionActive ? "27px" : "3px",
+                  transition: "left 0.3s ease",
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+                }}
+              />
+            </div>
+          </div>
+          <p style={{ margin: 0, fontSize: "12px", opacity: 0.9, lineHeight: 1.5 }}>
+            {fallDetectionActive
+              ? "Active — monitoring continues in background, with screen locked, and when display is off."
+              : "Tap to enable. Monitors accelerometer for falls even when app is in the background."}
+          </p>
+          {fallDetectionActive && (
+            <div style={{
+              marginTop: "8px",
+              padding: "4px 10px",
+              background: "rgba(255,255,255,0.15)",
+              borderRadius: "8px",
+              display: "inline-block",
+              fontSize: "11px",
+              fontWeight: 600,
+              letterSpacing: "0.3px",
+            }}>
+              ● FALL DETECTION ACTIVE
+            </div>
+          )}
+        </div>
 
         <SafetyOption
           icon="🚨"
