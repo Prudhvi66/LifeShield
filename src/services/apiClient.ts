@@ -9,6 +9,7 @@ const ENV_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replac
 const STORED_CUSTOM_URL = localStorage.getItem(CUSTOM_URL_KEY);
 let activeBaseUrl = (STORED_CUSTOM_URL || ENV_URL).replace(/\/+$/, '');
 const TOKEN_KEY = 'lifeshield_auth_token';
+const USER_KEY = 'lifeshield_user';
 
 // Allow additional fallback URLs to be configured via environment variable
 const FALLBACK_URLS_KEY = 'lifeshield_fallback_urls';
@@ -22,9 +23,18 @@ try {
 
 class ApiClient {
   private token: string | null = null;
+  private onAuthFailure: (() => void) | null = null;
 
   constructor() {
     this.token = localStorage.getItem(TOKEN_KEY);
+  }
+
+  /**
+   * Register a callback that fires when the token is invalid (401).
+   * Used by App.tsx to clear user state without circular imports.
+   */
+  public setAuthFailureHandler(handler: (() => void) | null) {
+    this.onAuthFailure = handler;
   }
 
   public getToken(): string | null {
@@ -39,6 +49,25 @@ class ApiClient {
   public clearToken() {
     this.token = null;
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  }
+
+  // --- User persistence (survives app restarts) ---
+  public getStoredUser(): any | null {
+    try {
+      const raw = localStorage.getItem(USER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  public setStoredUser(user: any | null) {
+    if (user) {
+      localStorage.setItem(USER_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_KEY);
+    }
   }
 
   public getBaseUrl(): string {
@@ -123,6 +152,19 @@ class ApiClient {
           } else if (rawText) {
             errorDetail = `HTTP ${response.status}: ${rawText.slice(0, 150)}`;
           }
+
+          // 401 on an authenticated request means the token is expired/invalid.
+          // Clear it so the user can re-authenticate cleanly.
+          if (response.status === 401 && this.token && !ep.includes('/api/auth/login') && !ep.includes('/api/auth/register')) {
+            console.warn('[LifeShield API] 401 Unauthorized — clearing stale token');
+            this.token = null;
+            localStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem(USER_KEY);
+            if (this.onAuthFailure) {
+              this.onAuthFailure();
+            }
+          }
+
           throw new Error(errorDetail);
         }
 

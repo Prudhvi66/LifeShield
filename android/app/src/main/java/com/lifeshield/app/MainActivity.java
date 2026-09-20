@@ -13,6 +13,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(EmergencySmsPlugin.class);
         registerPlugin(TextToSpeechPlugin.class);
         registerPlugin(LocationPlugin.class);
+        registerPlugin(PermissionsPlugin.class);
         registerPlugin(FallDetectionPlugin.class);
         super.onCreate(savedInstanceState);
         try {

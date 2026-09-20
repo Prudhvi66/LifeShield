@@ -3,7 +3,7 @@ import "./index.css";
 import { Capacitor } from "@capacitor/core";
 import { apiClient } from "./services/apiClient";
 import { bluetoothService, BLEDeviceStatus } from "./services/bluetoothService";
-import { voiceTtsService, VoiceLanguage, VoiceSettings } from "./services/voiceTtsService";
+import { voiceTtsService, VoiceSettings } from "./services/voiceTtsService";
 import { reminderScheduler, SchedulerReminder } from "./services/reminderScheduler";
 import { soundService } from "./services/soundService";
 import { LocationService, GeoLocationResult, MedicalCenterPoint } from "./services/locationService";
@@ -14,6 +14,8 @@ import { emergencySmsService, SmsSendResult } from "./services/emergencySmsServi
 import { AndroidLocationService } from "./services/androidLocationService";
 import { androidNotificationService, NotificationPermissionStatus } from "./services/androidNotificationService";
 import { nativeFallDetection } from "./services/nativeFallDetectionService";
+import { permissionService, PermissionGroupInfo, PermissionGroupKey } from "./services/permissionService";
+import { PermissionSetupScreen } from "./components/PermissionSetupScreen";
 import { LandingPage } from "./components/landing/LandingPage";
 import { RiskAnalysisView } from "./components/risk/RiskAnalysisView";
 import { WearablesView } from "./components/wearables/WearablesView";
@@ -139,10 +141,27 @@ export function App() {
     timestamp: new Date().toISOString(),
   });
   const [environment, setEnvironment] = useState<EnvironmentData>({});
+  const [selectedRegion, setSelectedRegion] = useState<string>("Hyderabad");
   const [trends, setTrends] = useState<any[]>([]);
   const [reminders, setReminders] = useState<ReminderItem[]>([]);
   const [contacts, setContacts] = useState<EmergencyContactItem[]>([]);
-  const [user, setUser] = useState<UserAccount | null>(null);
+  const [user, setUser] = useState<UserAccount | null>(() => {
+    // Restore user from localStorage on app startup
+    try {
+      const stored = apiClient.getStoredUser();
+      if (stored && apiClient.getToken()) {
+        return {
+          id: stored.id,
+          email: stored.email,
+          full_name: stored.full_name,
+          age: stored.age,
+          blood_group: stored.blood_group,
+          primary_language: stored.primary_language,
+        };
+      }
+    } catch { /* ignore */ }
+    return null;
+  });
   const [currentLocation, setCurrentLocation] = useState<GeoLocationResult | null>(null);
   const [nearbyHospitals, setNearbyHospitals] = useState<MedicalCenterPoint[]>([]);
 
@@ -156,6 +175,11 @@ export function App() {
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [statusToast, setStatusToast] = useState<{ message: string; type: "info" | "success" | "warning" } | null>(null);
   const [dataSource, setDataSource] = useState<"real" | "demo" | "mixed">("demo");
+
+  // Permission Setup (first-launch flow)
+  const [needsPermissionSetup, setNeedsPermissionSetup] = useState(() => {
+    return !permissionService.isSetupComplete();
+  });
 
   // Fall Detection & Emergency Countdown
   const [fallDetectionActive, setFallDetectionActive] = useState(() => {
@@ -394,6 +418,15 @@ export function App() {
     }
   }, []);
 
+  // Register auth failure handler — clears user state on 401
+  useEffect(() => {
+    apiClient.setAuthFailureHandler(() => {
+      setUser(null);
+      showToast("Session expired. Please sign in again.", "warning");
+    });
+    return () => apiClient.setAuthFailureHandler(null);
+  }, []);
+
   // Update browser time every second for diagnostics
   useEffect(() => {
     const timer = setInterval(() => {
@@ -413,14 +446,17 @@ export function App() {
       // 1. Auth & Profile
       const me = await apiClient.auth.getMe().catch(() => null);
       if (me) {
-        setUser({
+        const userData = {
           id: me.id,
           email: me.email,
           full_name: me.full_name,
           age: me.age,
           blood_group: me.blood_group,
           primary_language: me.primary_language,
-        });
+        };
+        setUser(userData);
+        // Persist user to localStorage so it survives app restarts
+        apiClient.setStoredUser(userData);
       }
 
       // 2. Health Summary
@@ -499,7 +535,7 @@ export function App() {
       }
 
       // 3. Environment (Real Open-Meteo)
-      const env = await apiClient.environment.get({ region: "Hyderabad" }).catch(() => null);
+      const env = await apiClient.environment.get({ region: selectedRegion }).catch(() => null);
       if (env) {
         setEnvironment({
           temperature: env.temperature_c,
@@ -582,7 +618,7 @@ export function App() {
     } finally {
       setIsRefreshing(false);
     }
-  }, []);
+  }, [selectedRegion]);
 
   useEffect(() => {
     loadData();
@@ -623,26 +659,23 @@ export function App() {
   }, [loadData, fallDetectionActive]);
 
   // -------------------------------------------------------------
-  // NATIVE FALL DETECTION SERVICE LIFECYCLE
-  // Start/stop the foreground service when the persisted state changes
+  // NATIVE FALL DETECTION SERVICE — STARTUP RESTORATION
+  // On app mount, if fall detection was left ON in localStorage,
+  // ensure the foreground service is running. This handles:
+  //   - App restart after process kill by Android
+  //   - App reopen after screen-off
+  //   - Cold start from notification tap
+  // The toggle handler (onToggleFallDetection) is the single source
+  // of truth for start/stop during the session. This effect only
+  // restores service state on mount.
   // -------------------------------------------------------------
   useEffect(() => {
     if (!nativeFallDetection.isNativeAndroid()) return;
-
     if (fallDetectionActive) {
-      nativeFallDetection.isRunning().then((running) => {
-        if (!running) {
-          nativeFallDetection.start();
-        }
-      });
-    } else {
-      nativeFallDetection.isRunning().then((running) => {
-        if (running) {
-          nativeFallDetection.stop();
-        }
-      });
+      nativeFallDetection.start();
     }
-  }, [fallDetectionActive]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // -------------------------------------------------------------
   // EMERGENCY SOS & FALL DETECTION ENGINE
@@ -1523,6 +1556,7 @@ export function App() {
         if (res.access_token) {
           apiClient.setToken(res.access_token);
           setUser(res.user);
+          apiClient.setStoredUser(res.user);
           setActiveModal("none");
           loadData();
           showToast(`Welcome, ${res.user.full_name}! Account created.`, "success");
@@ -1535,6 +1569,7 @@ export function App() {
         if (res.access_token) {
           apiClient.setToken(res.access_token);
           setUser(res.user);
+          apiClient.setStoredUser(res.user);
           setActiveModal("none");
           loadData();
           showToast(`Welcome back, ${res.user.full_name}!`, "success");
@@ -1790,6 +1825,11 @@ export function App() {
         </div>
       )}
 
+      {/* Permission Setup Screen (first launch) */}
+      {needsPermissionSetup && (
+        <PermissionSetupScreen onComplete={() => setNeedsPermissionSetup(false)} />
+      )}
+
       {/* =========================================================
           TOP APP HEADER
       ========================================================= */}
@@ -1863,6 +1903,8 @@ export function App() {
             onLogHydration={handleLogHydration}
             dataSource={dataSource}
             lastSyncTime={lastSyncTime}
+            selectedRegion={selectedRegion}
+            onRegionChange={setSelectedRegion}
           />
         )}
 
@@ -1945,15 +1987,9 @@ export function App() {
             baselineSpo2Floor={baselineSpo2Floor}
             baselineSaving={baselineSaving}
             baselineSavedSuccess={baselineSavedSuccess}
-            voiceSettings={voiceSettings}
             onSetBaselineHr={setBaselineRestingHr}
             onSetBaselineSpo2={setBaselineSpo2Floor}
             onSaveBaseline={handleSaveBaseline}
-            onUpdateVoiceSettings={(updated) => {
-              setVoiceSettings(updated);
-              voiceTtsService.saveSettings(updated);
-              showToast("Voice preferences updated.", "info");
-            }}
             onOpenAuth={() => setActiveModal("auth")}
             onOpenPermissions={() => setActiveModal("permissions")}
             onOpenReminders={() => setActiveModal("reminders")}
@@ -3006,63 +3042,7 @@ export function App() {
 
       {/* 11. PERMISSIONS MANAGER MODAL */}
       {activeModal === "permissions" && (
-        <div className="ls-modal-overlay" onClick={() => setActiveModal("none")}>
-          <div className="ls-modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="ls-modal-header">
-              <h3>Android Native Permissions Status</h3>
-              <button className="ls-close-btn" onClick={() => setActiveModal("none")}>
-                ✕
-              </button>
-            </div>
-
-            <div style={{ textAlign: "left", fontSize: "12px", color: "#4f4a64" }}>
-              {[
-                { name: "GPS Location (Browser Geolocation)", status: navigator.geolocation ? "Available" : "Not Supported", icon: "📍", ok: !!navigator.geolocation },
-                { name: "Motion Accelerometer (Fall Detection)", status: "devicemotion" in window ? "Available" : "Not Supported", icon: "🏃", ok: "devicemotion" in window },
-                { name: "Bluetooth LE Smartwatch (Web BLE)", status: "Available in Chromium browsers", icon: "⌚", ok: true },
-                { name: "Android Health Connect Bridge", status: "Native Android only", icon: "❤️", ok: true },
-                { name: "Emergency SMS/Call Dispatch", status: apiClient.getToken() ? "Simulated (Twilio not configured)" : "Login required to configure", icon: "📞", ok: false },
-                { name: "Text-to-Speech Voice", status: "speechSynthesis" in window ? "Browser Web Speech API" : "Not Supported", icon: "🔊", ok: "speechSynthesis" in window },
-              ].map((p, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    padding: "12px 0",
-                    borderBottom: "1px solid #f0edf7",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                    <span>{p.icon}</span>
-                    <strong style={{ color: "#342f4c" }}>{p.name}</strong>
-                  </div>
-                  <span className={`ls-badge ${p.ok ? "ls-badge-success" : "ls-badge-info"}`}>{p.status}</span>
-                </div>
-              ))}
-
-              <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
-                <button
-                  className="ls-btn-primary"
-                  style={{ flex: 1 }}
-                  type="button"
-                  onClick={() => HealthConnectService.openSettings()}
-                >
-                  Configure Health Connect
-                </button>
-                <button
-                  className="ls-btn-secondary"
-                  style={{ flex: 1 }}
-                  type="button"
-                  onClick={() => setActiveModal("none")}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <PermissionsModal onClose={() => setActiveModal("none")} />
       )}
 
       {/* 12. SOS STATUS PANEL MODAL */}
@@ -3448,6 +3428,8 @@ function HomeScreen({
   onLogHydration,
   dataSource,
   lastSyncTime,
+  selectedRegion,
+  onRegionChange,
 }: {
   health: HealthData;
   environment: EnvironmentData;
@@ -3465,8 +3447,26 @@ function HomeScreen({
   onLogHydration: () => void;
   dataSource: "real" | "demo" | "mixed";
   lastSyncTime: string | null;
+  selectedRegion: string;
+  onRegionChange: (region: string) => void;
 }) {
   const nextMedicine = reminders.find((r) => r.reminder_type === "Medicine") || reminders[0];
+
+  const [regionPickerOpen, setRegionPickerOpen] = useState(false);
+
+  const SUPPORTED_LOCATIONS = [
+    { key: "Hyderabad", label: "Hyderabad, Telangana" },
+    { key: "Mumbai", label: "Mumbai, Maharashtra" },
+    { key: "Delhi", label: "Delhi, NCT" },
+    { key: "Bengaluru", label: "Bengaluru, Karnataka" },
+    { key: "Chennai", label: "Chennai, Tamil Nadu" },
+    { key: "Kolkata", label: "Kolkata, West Bengal" },
+    { key: "Visakhapatnam", label: "Visakhapatnam, AP" },
+    { key: "Vijayawada", label: "Vijayawada, AP" },
+    { key: "Pune", label: "Pune, Maharashtra" },
+  ];
+
+  const currentLocation = SUPPORTED_LOCATIONS.find((l) => l.key === selectedRegion) || SUPPORTED_LOCATIONS[0];
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -3663,11 +3663,16 @@ function HomeScreen({
         </button>
       </section>
 
-      {/* ENVIRONMENT CARD (OPEN-METEO) */}
+      {/* YOUR ENVIRONMENT */}
       <section className="section-title-row">
         <div>
-          <span>ATMOSPHERIC HAZARDS</span>
-          <h2>Around you (Open-Meteo)</h2>
+          <span>YOUR ENVIRONMENT</span>
+          <h2>Atmosphere around you</h2>
+          {environment.weather && (
+            <div style={{ fontSize: "12px", color: "#8c8799", marginTop: "2px" }}>
+              {environment.weather}
+            </div>
+          )}
         </div>
         <button type="button" onClick={onOpenEnvironment}>
           Details & Advisories
@@ -3675,34 +3680,112 @@ function HomeScreen({
       </section>
 
       <section
-        className="environment-card"
+        className="env-metrics-card"
         onClick={onOpenEnvironment}
         role="button"
         tabIndex={0}
       >
-        <div className="environment-illustration">☁</div>
-        <div className="environment-info">
-          <div className="environment-temperature">
-            {environment.temperature ?? "—"}
-            {available(environment.temperature) ? "°C" : ""}
-          </div>
-          <div className="environment-weather">
-            {environment.weather || "Clear Sky"} • AQI: {environment.aqi ?? "72 (Moderate)"}
-          </div>
+        {/* Location & freshness */}
+        <div className="env-metrics-header">
+          <button
+            className="env-metrics-region-btn"
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setRegionPickerOpen(true); }}
+          >
+            📍 {currentLocation.label}
+            <span className="env-metrics-chevron">▾</span>
+          </button>
+          <span className="env-metrics-fresh">
+            {dataSource === "demo" ? "Demo data" : "Live data"}
+          </span>
         </div>
 
-        <div className="environment-values">
-          <div>
-            <span>HUMIDITY</span>
-            <strong>{environment.humidity ? `${environment.humidity}%` : "52%"}</strong>
+        {/* Metric grid */}
+        <div className="env-metrics-grid">
+          {/* Temperature */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{ background: "#fef3c7", color: "#d97706" }}>🌡️</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">Temperature</span>
+              <strong className="env-metric-value">
+                {available(environment.temperature) ? `${environment.temperature}°C` : "—"}
+              </strong>
+              <span className="env-metric-sub">
+                {environment.weather || "Current temperature"}
+              </span>
+            </div>
           </div>
-          <div>
-            <span>HEAT INDEX</span>
-            <strong>{environment.heat_index ? `${environment.heat_index}°C` : "31°C"}</strong>
+
+          {/* Air Quality */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{
+              background: (environment.aqi ?? 0) <= 50 ? "#dcfce7" : (environment.aqi ?? 0) <= 100 ? "#fef9c3" : "#fee2e2",
+              color: (environment.aqi ?? 0) <= 50 ? "#16a34a" : (environment.aqi ?? 0) <= 100 ? "#ca8a04" : "#dc2626",
+            }}>🫁</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">Air Quality</span>
+              <strong className="env-metric-value">
+                {available(environment.aqi) ? `${environment.aqi}` : "—"}
+                {environment.aqi_level ? <span className="env-metric-tag">{environment.aqi_level}</span> : null}
+              </strong>
+              <span className="env-metric-sub">AQI · {environment.pm2_5 != null ? `PM2.5: ${environment.pm2_5}` : "Particulate matter"}</span>
+            </div>
           </div>
-          <div>
-            <span>FLOOD RISK</span>
-            <strong>{environment.flood_risk_level || "Low"}</strong>
+
+          {/* UV Index */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{
+              background: (environment.uv_index ?? 0) < 3 ? "#dcfce7" : (environment.uv_index ?? 0) < 6 ? "#fef9c3" : (environment.uv_index ?? 0) < 8 ? "#ffedd5" : "#fee2e2",
+              color: (environment.uv_index ?? 0) < 3 ? "#16a34a" : (environment.uv_index ?? 0) < 6 ? "#ca8a04" : (environment.uv_index ?? 0) < 8 ? "#ea580c" : "#dc2626",
+            }}>☀️</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">UV Index</span>
+              <strong className="env-metric-value">
+                {available(environment.uv_index) ? `${environment.uv_index}` : "—"}
+                {environment.uv_index != null && (
+                  <span className="env-metric-tag">
+                    {environment.uv_index < 3 ? "Low" : environment.uv_index < 6 ? "Moderate" : environment.uv_index < 8 ? "High" : "Very High"}
+                  </span>
+                )}
+              </strong>
+              <span className="env-metric-sub">Sun exposure risk</span>
+            </div>
+          </div>
+
+          {/* Feels Like */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{ background: "#fee2e2", color: "#dc2626" }}>🔥</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">Feels Like</span>
+              <strong className="env-metric-value">
+                {available(environment.heat_index) ? `${environment.heat_index}°C` : "—"}
+              </strong>
+              <span className="env-metric-sub">Heat index</span>
+            </div>
+          </div>
+
+          {/* Humidity */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{ background: "#dbeafe", color: "#2563eb" }}>💧</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">Humidity</span>
+              <strong className="env-metric-value">
+                {available(environment.humidity) ? `${environment.humidity}%` : "—"}
+              </strong>
+              <span className="env-metric-sub">Relative humidity</span>
+            </div>
+          </div>
+
+          {/* Wind */}
+          <div className="env-metric-item">
+            <div className="env-metric-icon" style={{ background: "#f0fdf4", color: "#16a34a" }}>🌬️</div>
+            <div className="env-metric-body">
+              <span className="env-metric-label">Wind</span>
+              <strong className="env-metric-value">
+                {available(environment.wind_speed_kmh) ? `${environment.wind_speed_kmh} km/h` : "—"}
+              </strong>
+              <span className="env-metric-sub">Wind speed</span>
+            </div>
           </div>
         </div>
 
@@ -3718,6 +3801,33 @@ function HomeScreen({
         </div>
         <span className="banner-arrow">→</span>
       </button>
+
+      {/* REGION PICKER MODAL */}
+      {regionPickerOpen && (
+        <div className="modal-overlay" onClick={() => setRegionPickerOpen(false)}>
+          <div className="modal-content region-picker-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="region-picker-header">
+              <h3>Select Location</h3>
+              <button className="region-picker-close" type="button" onClick={() => setRegionPickerOpen(false)}>✕</button>
+            </div>
+            <p className="region-picker-sub">Choose a supported city for live environment data</p>
+            <div className="region-picker-list">
+              {SUPPORTED_LOCATIONS.map((loc) => (
+                <button
+                  key={loc.key}
+                  className={`region-picker-item${selectedRegion === loc.key ? " active" : ""}`}
+                  type="button"
+                  onClick={() => { onRegionChange(loc.key); setRegionPickerOpen(false); }}
+                >
+                  <span className="region-picker-dot" />
+                  <span>{loc.label}</span>
+                  {selectedRegion === loc.key && <span className="region-picker-check">✓</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -4186,11 +4296,9 @@ function ProfileScreen({
   baselineSpo2Floor,
   baselineSaving,
   baselineSavedSuccess,
-  voiceSettings,
   onSetBaselineHr,
   onSetBaselineSpo2,
   onSaveBaseline,
-  onUpdateVoiceSettings,
   onOpenAuth,
   onOpenPermissions,
   onOpenReminders,
@@ -4205,11 +4313,9 @@ function ProfileScreen({
   baselineSpo2Floor: number;
   baselineSaving: boolean;
   baselineSavedSuccess: boolean;
-  voiceSettings: VoiceSettings;
   onSetBaselineHr: (v: number) => void;
   onSetBaselineSpo2: (v: number) => void;
   onSaveBaseline: () => void;
-  onUpdateVoiceSettings: (s: VoiceSettings) => void;
   onOpenAuth: () => void;
   onOpenPermissions: () => void;
   onOpenReminders: () => void;
@@ -4224,7 +4330,7 @@ function ProfileScreen({
       <PageHeading
         label="ACCOUNT & SETTINGS"
         title="Your profile"
-        description="Personal baseline calibration, voice preferences, and privacy controls."
+        description="Personal baseline calibration and privacy controls."
       />
 
       {/* PROFILE BANNER */}
@@ -4287,31 +4393,6 @@ function ProfileScreen({
               style={{ width: "100%", marginTop: "6px" }}
             />
           </div>
-        </div>
-      </section>
-
-      {/* VOICE PREFERENCES */}
-      <section className="notice-card" style={{ display: "block", marginTop: "14px" }}>
-        <strong style={{ display: "block", marginBottom: "12px" }}>Voice Reminders (Telugu, Hindi, English)</strong>
-        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-          <select
-            className="ls-select"
-            style={{ flex: 1 }}
-            value={voiceSettings.language}
-            onChange={(e) => onUpdateVoiceSettings({ ...voiceSettings, language: e.target.value as VoiceLanguage })}
-          >
-            <option value="en">English (India / US)</option>
-            <option value="te">Telugu (తెలుగు)</option>
-            <option value="hi">Hindi (हिन्दी)</option>
-          </select>
-
-          <button
-            type="button"
-            className="ls-btn-secondary"
-            onClick={() => voiceTtsService.speakRaw("LifeShield voice reminder system test is successful.", voiceSettings.language)}
-          >
-            Test Voice 🔊
-          </button>
         </div>
       </section>
 
@@ -4459,6 +4540,135 @@ function NavButton({
       <span>{icon}</span>
       <small>{label}</small>
     </button>
+  );
+}
+
+function PermissionsModal({ onClose }: { onClose: () => void }) {
+  const [groups, setGroups] = useState<PermissionGroupInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [requesting, setRequesting] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    const result = await permissionService.checkAllPermissions();
+    setGroups(result);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleRequest = async (key: PermissionGroupKey) => {
+    setRequesting(key);
+    try {
+      await permissionService.requestPermission(key);
+      await refresh();
+    } catch (err) {
+      console.warn("[PermissionsModal] Request failed:", err);
+    } finally {
+      setRequesting(null);
+    }
+  };
+
+  return (
+    <div className="ls-modal-overlay" onClick={onClose}>
+      <div className="ls-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "80vh", overflow: "auto" }}>
+        <div className="ls-modal-header">
+          <h3>Permissions Status</h3>
+          <button className="ls-close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <div style={{ textAlign: "left", fontSize: "12px", color: "#4f4a64" }}>
+          {loading ? (
+            <div style={{ padding: "20px 0", textAlign: "center", color: "#7c3aed" }}>Checking permissions...</div>
+          ) : (
+            <>
+              {groups.map((g) => (
+                <div
+                  key={g.key}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "12px 0",
+                    borderBottom: "1px solid #f0edf7",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <span>{g.icon}</span>
+                    <div>
+                      <strong style={{ color: "#342f4c" }}>{g.title}</strong>
+                      {g.critical && (
+                        <span style={{ fontSize: "10px", color: "#dc2626", marginLeft: "6px" }}>Critical</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    {g.status === "granted" ? (
+                      <span className="ls-badge ls-badge-success">Granted</span>
+                    ) : g.status === "not_required" ? (
+                      <span className="ls-badge ls-badge-info">N/A</span>
+                    ) : (
+                      <>
+                        <span className="ls-badge ls-badge-info">Not granted</span>
+                        {g.key === "healthConnect" ? (
+                          <button
+                            className="ls-btn-secondary"
+                            style={{ padding: "4px 10px", fontSize: "10px" }}
+                            type="button"
+                            onClick={() => permissionService.openHealthConnectSettings()}
+                          >
+                            Set up
+                          </button>
+                        ) : (
+                          <button
+                            className="ls-btn-secondary"
+                            style={{ padding: "4px 10px", fontSize: "10px" }}
+                            type="button"
+                            disabled={requesting === g.key}
+                            onClick={() => handleRequest(g.key)}
+                          >
+                            {requesting === g.key ? "..." : "Allow"}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
+                <button
+                  className="ls-btn-secondary"
+                  style={{ flex: 1 }}
+                  type="button"
+                  onClick={() => permissionService.openAppSettings()}
+                >
+                  Android Settings
+                </button>
+                <button
+                  className="ls-btn-secondary"
+                  style={{ flex: 1 }}
+                  type="button"
+                  onClick={refresh}
+                >
+                  Refresh
+                </button>
+                <button
+                  className="ls-btn-primary"
+                  style={{ flex: 1 }}
+                  type="button"
+                  onClick={onClose}
+                >
+                  Close
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
