@@ -3,9 +3,13 @@ LifeShield Application Configuration.
 Reads settings from environment variables or .env file.
 """
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+CANONICAL_SQLITE_PATH = (BACKEND_DIR / "lifeshield.db").as_posix()
 
 
 class Settings(BaseSettings):
@@ -21,7 +25,16 @@ class Settings(BaseSettings):
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
     # Database: Supports PostgreSQL (e.g. postgresql://user:pass@localhost:5432/db) or SQLite fallback
-    database_url: str = Field(default="sqlite:///./lifeshield.db")
+    database_url: str = Field(default=f"sqlite:///{CANONICAL_SQLITE_PATH}")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def canonicalize_database_url(cls, v: str) -> str:
+        if isinstance(v, str) and v.startswith("sqlite:///."):
+            rel_part = v.replace("sqlite:///.", "").lstrip("/\\")
+            abs_path = (BACKEND_DIR / rel_part).as_posix()
+            return f"sqlite:///{abs_path}"
+        return v
 
     # Security & JWT
     jwt_secret_key: str = Field(default="lifeshield_super_secure_jwt_secret_key_2026_change_in_production")

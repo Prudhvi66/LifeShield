@@ -124,6 +124,23 @@ public class FallDetectionPlugin extends Plugin implements FallDetectionService.
     }
 
     /**
+     * Stop the native alarm tone and dismiss the alert notification.
+     * Called when the user taps "I'M OK" on the emergency countdown modal.
+     */
+    @PluginMethod
+    public void stopAlarm(PluginCall call) {
+        Context context = getContext();
+        FallDetectionService.stopAlarm(context);
+        sHasPendingFall = false;
+        sPendingPeakG = 0;
+        sPendingTimestamp = null;
+        JSObject ret = new JSObject();
+        ret.put("stopped", true);
+        call.resolve(ret);
+        Log.d(TAG, "Native fall alarm stopped via plugin");
+    }
+
+    /**
      * Called by FallDetectionService when a fall is confirmed.
      * Notifies the JavaScript side via a Capacitor event.
      * If JS is not ready, stores as pending for later retrieval.

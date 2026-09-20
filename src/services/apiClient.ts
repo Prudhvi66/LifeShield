@@ -21,12 +21,29 @@ try {
   // ignore parse errors
 }
 
+export function isJwtExpired(token: string): boolean {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return true;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (!payload || !payload.exp) return false;
+    // Expired if current epoch is past payload.exp (with 15s leeway)
+    return Math.floor(Date.now() / 1000) >= payload.exp - 15;
+  } catch {
+    return false;
+  }
+}
+
 class ApiClient {
   private token: string | null = null;
   private onAuthFailure: (() => void) | null = null;
 
   constructor() {
     this.token = localStorage.getItem(TOKEN_KEY);
+    if (this.token && isJwtExpired(this.token)) {
+      console.warn('[LifeShield Auth] Stored token has expired — clearing on initialization');
+      this.clearToken('stored_token_expired');
+    }
   }
 
   /**
@@ -46,7 +63,8 @@ class ApiClient {
     localStorage.setItem(TOKEN_KEY, token);
   }
 
-  public clearToken() {
+  public clearToken(reason: string = 'explicit') {
+    console.log(`[LifeShield Auth] Session invalidated (reason: ${reason})`);
     this.token = null;
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
@@ -153,15 +171,22 @@ class ApiClient {
             errorDetail = `HTTP ${response.status}: ${rawText.slice(0, 150)}`;
           }
 
-          // 401 on an authenticated request means the token is expired/invalid.
-          // Clear it so the user can re-authenticate cleanly.
+          // 401 on an authenticated request: only invalidate the session if the token
+          // is genuinely expired or if the core /api/auth/me verification fails.
+          // Do not wipe sessions for harmless secondary endpoint hiccups.
           if (response.status === 401 && this.token && !ep.includes('/api/auth/login') && !ep.includes('/api/auth/register')) {
-            console.warn('[LifeShield API] 401 Unauthorized — clearing stale token');
-            this.token = null;
-            localStorage.removeItem(TOKEN_KEY);
-            localStorage.removeItem(USER_KEY);
-            if (this.onAuthFailure) {
-              this.onAuthFailure();
+            const tokenExpired = isJwtExpired(this.token);
+            const isAuthMe = ep.includes('/api/auth/me');
+
+            if (isAuthMe || tokenExpired) {
+              const reason = tokenExpired ? 'token_expired_claims' : 'auth_me_rejected';
+              console.warn(`[LifeShield Auth] 401 Unauthorized on ${ep} (reason: ${reason}) — clearing invalid session`);
+              this.clearToken(reason);
+              if (this.onAuthFailure) {
+                this.onAuthFailure();
+              }
+            } else {
+              console.warn(`[LifeShield Auth] 401 on secondary endpoint ${ep}, but token exp is valid. Preserving session.`);
             }
           }
 

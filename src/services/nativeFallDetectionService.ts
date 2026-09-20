@@ -9,6 +9,7 @@ import { registerPlugin, Capacitor } from '@capacitor/core';
 export interface FallDetectionNativePlugin {
   start(): Promise<{ started: boolean; message: string }>;
   stop(): Promise<{ stopped: boolean; message: string }>;
+  stopAlarm(): Promise<{ stopped: boolean }>;
   isRunning(): Promise<{ running: boolean }>;
   getPendingFall(): Promise<{
     hasPending: boolean;
@@ -72,6 +73,21 @@ export class NativeFallDetectionService {
       return result.stopped;
     } catch (err: any) {
       console.error('[FallDetection] Failed to stop native service:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Stop any active native siren/vibrator and dismiss the alert notification.
+   */
+  public async stopAlarm(): Promise<boolean> {
+    if (!this.isNativeAndroid()) return false;
+
+    try {
+      const result = await FallDetectionNative.stopAlarm();
+      return result.stopped;
+    } catch (err: any) {
+      console.error('[FallDetection] Failed to stop native alarm:', err);
       return false;
     }
   }

@@ -141,6 +141,8 @@ export function App() {
     timestamp: new Date().toISOString(),
   });
   const [environment, setEnvironment] = useState<EnvironmentData>({});
+  const [envLoading, setEnvLoading] = useState<boolean>(false);
+  const [envError, setEnvError] = useState<boolean>(false);
   const [selectedRegion, setSelectedRegion] = useState<string>("Hyderabad");
   const [trends, setTrends] = useState<any[]>([]);
   const [reminders, setReminders] = useState<ReminderItem[]>([]);
@@ -444,19 +446,27 @@ export function App() {
     setIsRefreshing(true);
     try {
       // 1. Auth & Profile
-      const me = await apiClient.auth.getMe().catch(() => null);
-      if (me) {
-        const userData = {
-          id: me.id,
-          email: me.email,
-          full_name: me.full_name,
-          age: me.age,
-          blood_group: me.blood_group,
-          primary_language: me.primary_language,
-        };
-        setUser(userData);
-        // Persist user to localStorage so it survives app restarts
-        apiClient.setStoredUser(userData);
+      if (apiClient.getToken()) {
+        try {
+          const me = await apiClient.auth.getMe();
+          if (me) {
+            const userData = {
+              id: me.id,
+              email: me.email,
+              full_name: me.full_name,
+              age: me.age,
+              blood_group: me.blood_group,
+              primary_language: me.primary_language,
+            };
+            setUser(userData);
+            apiClient.setStoredUser(userData);
+            console.log("[LifeShield Auth] Session verified via /me for:", me.email);
+          }
+        } catch (err: any) {
+          // If token was rejected with 401, apiClient already invalidated it.
+          // If network / server error, preserve cached session!
+          console.warn("[LifeShield Auth] /me verification note:", err.message);
+        }
       }
 
       // 2. Health Summary
@@ -535,22 +545,32 @@ export function App() {
       }
 
       // 3. Environment (Real Open-Meteo)
-      const env = await apiClient.environment.get({ region: selectedRegion }).catch(() => null);
-      if (env) {
-        setEnvironment({
-          temperature: env.temperature_c,
-          humidity: env.humidity_percent,
-          aqi: env.aqi,
-          aqi_level: env.aqi_level,
-          weather: env.weather_condition,
-          heat_index: env.heat_index_c,
-          flood_risk_level: env.flood_risk_level,
-          wind_speed_kmh: env.wind_speed_kmh,
-          uv_index: env.uv_index,
-          pm2_5: env.pm2_5,
-          pm10: env.pm10,
-          advisories: env.advisories || [],
-        });
+      setEnvLoading(true);
+      setEnvError(false);
+      try {
+        const env = await apiClient.environment.get({ region: selectedRegion });
+        if (env) {
+          setEnvironment({
+            temperature: env.temperature_c,
+            humidity: env.humidity_percent,
+            aqi: env.aqi,
+            aqi_level: env.aqi_level,
+            weather: env.weather_condition,
+            heat_index: env.heat_index_c,
+            flood_risk_level: env.flood_risk_level,
+            wind_speed_kmh: env.wind_speed_kmh,
+            uv_index: env.uv_index,
+            pm2_5: env.pm2_5,
+            pm10: env.pm10,
+            advisories: env.advisories || [],
+          });
+          setEnvError(false);
+        }
+      } catch (envErr) {
+        console.warn("[LifeShield Environment] Failed to fetch live environment data:", envErr);
+        setEnvError(true);
+      } finally {
+        setEnvLoading(false);
       }
 
       // 4. Trends
@@ -914,6 +934,7 @@ export function App() {
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     soundService.stopEmergencySiren();
     soundService.playSafeChime();
+    nativeFallDetection.stopAlarm();
     sosInProgressRef.current = false;
 
     // Record cancellation to backend if authenticated
@@ -1905,6 +1926,8 @@ export function App() {
             lastSyncTime={lastSyncTime}
             selectedRegion={selectedRegion}
             onRegionChange={setSelectedRegion}
+            envLoading={envLoading}
+            envError={envError}
           />
         )}
 
@@ -2966,30 +2989,30 @@ export function App() {
                 <div style={{ background: "#f8f6fd", padding: "12px", borderRadius: "14px" }}>
                   <span style={{ fontSize: "10px", color: "#8d87a4" }}>AIR QUALITY (AQI)</span>
                   <div style={{ fontSize: "20px", fontWeight: 800, color: "#322e4c" }}>
-                    {environment.aqi ?? "72"}
+                    {available(environment.aqi) ? `${environment.aqi}` : "—"}
                   </div>
                   <span style={{ fontSize: "10px", color: "#7770bd" }}>
-                    Status: {environment.aqi_level || "Moderate"}
+                    Status: {environment.aqi_level || "—"}
                   </span>
                 </div>
 
                 <div style={{ background: "#f8f6fd", padding: "12px", borderRadius: "14px" }}>
                   <span style={{ fontSize: "10px", color: "#8d87a4" }}>RELATIVE HUMIDITY</span>
                   <div style={{ fontSize: "18px", fontWeight: 800, color: "#322e4c" }}>
-                    {environment.humidity ?? "52"}%
+                    {available(environment.humidity) ? `${environment.humidity}%` : "—"}
                   </div>
                   <span style={{ fontSize: "10px", color: "#7770bd" }}>
-                    Wind: {environment.wind_speed_kmh ?? "11.5"} km/h
+                    {available(environment.wind_speed_kmh) ? `Wind: ${environment.wind_speed_kmh} km/h` : "Wind: —"}
                   </span>
                 </div>
 
                 <div style={{ background: "#f8f6fd", padding: "12px", borderRadius: "14px" }}>
                   <span style={{ fontSize: "10px", color: "#8d87a4" }}>FLOOD / DISASTER RISK</span>
                   <div style={{ fontSize: "18px", fontWeight: 800, color: "#322e4c" }}>
-                    {environment.flood_risk_level || "Low Risk"}
+                    {environment.flood_risk_level || "—"}
                   </div>
                   <span style={{ fontSize: "10px", color: "#7770bd" }}>
-                    UV Index: {environment.uv_index ?? "6 (Moderate)"}
+                    {available(environment.uv_index) ? `UV Index: ${environment.uv_index}` : "UV Index: —"}
                   </span>
                 </div>
               </div>
@@ -3430,6 +3453,8 @@ function HomeScreen({
   lastSyncTime,
   selectedRegion,
   onRegionChange,
+  envLoading,
+  envError,
 }: {
   health: HealthData;
   environment: EnvironmentData;
@@ -3449,6 +3474,8 @@ function HomeScreen({
   lastSyncTime: string | null;
   selectedRegion: string;
   onRegionChange: (region: string) => void;
+  envLoading?: boolean;
+  envError?: boolean;
 }) {
   const nextMedicine = reminders.find((r) => r.reminder_type === "Medicine") || reminders[0];
 
@@ -3696,7 +3723,7 @@ function HomeScreen({
             <span className="env-metrics-chevron">▾</span>
           </button>
           <span className="env-metrics-fresh">
-            {dataSource === "demo" ? "Demo data" : "Live data"}
+            {envLoading ? "Updating environment..." : envError ? "Live data unavailable" : "Live Open-Meteo feed"}
           </span>
         </div>
 
