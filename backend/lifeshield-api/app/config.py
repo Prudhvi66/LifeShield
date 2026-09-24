@@ -10,11 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 CANONICAL_SQLITE_PATH = (BACKEND_DIR / "lifeshield.db").as_posix()
+CANONICAL_ENV_PATH = (BACKEND_DIR / ".env").as_posix()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(CANONICAL_ENV_PATH, ".env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -75,9 +76,11 @@ class Settings(BaseSettings):
         )
     )
 
-    # AI API Keys (Optional server-side keys)
+    # AI API Keys & Configuration
     gemini_api_key: Optional[str] = Field(default=None)
+    gemini_model: str = Field(default="gemini-3.6-flash")
     openai_api_key: Optional[str] = Field(default=None)
+    openai_model: str = Field(default="gpt-4o-mini")
     openweather_api_key: Optional[str] = Field(default=None)
 
     # Emergency Service Number (configurable, default 112)

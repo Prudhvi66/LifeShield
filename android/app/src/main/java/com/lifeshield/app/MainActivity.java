@@ -12,23 +12,50 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        registerPlugin(HealthConnectPlugin.class);
-        registerPlugin(EmergencyCallPlugin.class);
-        registerPlugin(EmergencySmsPlugin.class);
-        registerPlugin(TextToSpeechPlugin.class);
-        registerPlugin(LocationPlugin.class);
-        registerPlugin(PermissionsPlugin.class);
-        registerPlugin(FallDetectionPlugin.class);
+        // Install emergency diagnostic crash logger
+        final Thread.UncaughtExceptionHandler defaultHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            android.util.Log.e("LifeShield", "FATAL UNCAUGHT EXCEPTION in thread " + thread.getName() + ": " + throwable.getMessage(), throwable);
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable);
+            }
+        });
+
+        // Safely register plugins so that failure of any one plugin NEVER crashes app startup
+        safeRegisterPlugin(HealthConnectPlugin.class);
+        safeRegisterPlugin(BluetoothGattPlugin.class);
+        safeRegisterPlugin(EmergencyCallPlugin.class);
+        safeRegisterPlugin(EmergencySmsPlugin.class);
+        safeRegisterPlugin(TextToSpeechPlugin.class);
+        safeRegisterPlugin(LocationPlugin.class);
+        safeRegisterPlugin(PermissionsPlugin.class);
+        safeRegisterPlugin(FallDetectionPlugin.class);
+
         super.onCreate(savedInstanceState);
+
         try {
             if (this.bridge != null && this.bridge.getWebView() != null) {
                 this.bridge.getWebView().getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             }
-        } catch (Exception ignored) {
+        } catch (Throwable t) {
+            android.util.Log.w("LifeShield", "WebView mixed content setting note: " + t.getMessage());
         }
 
         // Handle fall detection intent if app was launched by the service notification
-        handleFallDetectionIntent(getIntent());
+        try {
+            handleFallDetectionIntent(getIntent());
+        } catch (Throwable t) {
+            android.util.Log.w("LifeShield", "Fall detection intent note: " + t.getMessage());
+        }
+    }
+
+    private void safeRegisterPlugin(Class<? extends com.getcapacitor.Plugin> pluginClass) {
+        try {
+            registerPlugin(pluginClass);
+            android.util.Log.d("LifeShield", "Safely registered plugin: " + pluginClass.getSimpleName());
+        } catch (Throwable t) {
+            android.util.Log.e("LifeShield", "Could not register plugin " + pluginClass.getSimpleName() + " (will continue without it): " + t.getMessage(), t);
+        }
     }
 
     @Override

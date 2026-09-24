@@ -31,6 +31,7 @@ export const LifeShieldChatbot: React.FC = () => {
   const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isSendingRef = useRef(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -54,7 +55,8 @@ export const LifeShieldChatbot: React.FC = () => {
 
   const handleSend = async (questionText?: string) => {
     const q = (questionText || input).trim();
-    if (!q || isTyping) return;
+    if (!q || isTyping || isSendingRef.current) return;
+    isSendingRef.current = true;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -90,38 +92,84 @@ export const LifeShieldChatbot: React.FC = () => {
       };
 
       const res = await apiClient.ai.chat(q, context);
+      const replyText = res.reply || (res as any).message || (res as any).text || '';
 
       const botMsg: ChatMessage = {
         id: `bot-${Date.now()}`,
         sender: "bot",
-        text: res.reply,
+        text: replyText,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         source: res.source === "gemini" ? "Google Gemini" : res.source === "openai" ? "OpenAI GPT" : "LifeShield Clinical Safety",
       };
 
       setMessages((prev) => [...prev, botMsg]);
     } catch (err: any) {
-      const fallbackMsg: ChatMessage = {
-        id: `bot-err-${Date.now()}`,
-        sender: "bot",
-        text: "I am having trouble reaching the server right now. If you are experiencing a medical emergency, please press the SOS button or contact local emergency services immediately.",
-        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        source: "System Fallback",
-      };
-      setMessages((prev) => [...prev, fallbackMsg]);
+      const is422 = err?.status === 422 || (typeof err?.message === 'string' && (err.message.includes('422') || err.message.includes('Field required') || err.message.includes('json_invalid')));
+      const isNetworkFailure = !err?.status || err?.status === 0 || err?.name === 'AbortError' || (typeof err?.message === 'string' && (
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('unreachable') ||
+        err.message.includes('aborted')
+      ));
+
+      if (is422) {
+        console.error('[LifeShield Chatbot] Request validation error (HTTP 422):', err?.message);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-err-${Date.now()}`,
+            sender: "bot",
+            text: `Request schema validation error: ${err.message || 'Invalid format'}. Please ensure "question" field is provided.`,
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "Schema Error",
+          },
+        ]);
+      } else if (isNetworkFailure) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-err-${Date.now()}`,
+            sender: "bot",
+            text: "I am having trouble reaching the server right now. If you are experiencing a medical emergency, please press the SOS button or contact local emergency services immediately.",
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "System Fallback",
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-err-${Date.now()}`,
+            sender: "bot",
+            text: `LifeShield AI error: ${err.message || 'An unexpected error occurred.'}`,
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "Error",
+          },
+        ]);
+      }
     } finally {
       setIsTyping(false);
+      isSendingRef.current = false;
     }
   };
 
-  // Real Web Speech Recognition
+  // Real Web Speech Recognition with graceful error handling
   const startVoiceInput = () => {
     const SpeechRecognition =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("Speech recognition is not supported in this browser. Please use Chrome or Edge.");
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `bot-voice-unsupported-${Date.now()}`,
+          sender: "bot",
+          text: "Voice input is not supported in this browser. Please use Google Chrome or Microsoft Edge.",
+          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          source: "Voice Service",
+        },
+      ]);
       return;
     }
 
@@ -146,6 +194,18 @@ export const LifeShieldChatbot: React.FC = () => {
       recognition.onerror = (event: any) => {
         console.warn("Speech recognition error:", event.error);
         setIsListening(false);
+        if (event.error === "not-allowed") {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `bot-mic-denied-${Date.now()}`,
+              sender: "bot",
+              text: "Microphone access was denied. Please allow microphone permissions in your browser to speak with LifeShield.",
+              time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              source: "Voice Service",
+            },
+          ]);
+        }
       };
 
       recognition.onend = () => {
@@ -153,7 +213,7 @@ export const LifeShieldChatbot: React.FC = () => {
       };
 
       recognition.start();
-    } catch (e) {
+    } catch (e: any) {
       console.warn("Could not start speech recognition:", e);
       setIsListening(false);
     }
@@ -275,7 +335,12 @@ export const LifeShieldChatbot: React.FC = () => {
               placeholder={isListening ? "Listening to your voice..." : "Ask LifeShield AI..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSend()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isTyping) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
               className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 font-medium outline-none focus:border-[#00A88F] focus:bg-white transition-all"
             />
 

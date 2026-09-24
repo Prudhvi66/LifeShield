@@ -31,7 +31,6 @@ def get_dispatch_preferences(
             ambulance_number="108",
             unified_emergency_number="112",
             country="IN",
-            created_at=datetime.now(timezone.utc),
         )
         db.add(pref)
         db.commit()

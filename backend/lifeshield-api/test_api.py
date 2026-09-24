@@ -3,6 +3,7 @@ Comprehensive API Integration Test Suite for LifeShield Backend.
 Validates all endpoints using FastAPI TestClient.
 """
 import time
+from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
@@ -225,6 +226,77 @@ def test_ai_assistant(auth_headers):
     # Replace non-ascii for console printing
     safe_reply = ai_data["reply"][:80].encode("ascii", "replace").decode("ascii")
     print(f"  -> Passed AI response: '{safe_reply}...' (Source: {ai_data['source']})")
+
+
+def test_ai_assistant_gemini_mocked_success(auth_headers):
+    """Verifies that when Gemini API responds successfully, the reply and source 'gemini' are returned."""
+    mock_chat = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Hello! I am LifeShield Companion. Your recorded heart rate of 74 BPM is within the normal resting range."
+    mock_chat.send_message = AsyncMock(return_value=mock_response)
+
+    mock_client = MagicMock()
+    mock_client.aio.chats.create = MagicMock(return_value=mock_chat)
+
+    with patch("app.ai_service.get_gemini_client", return_value=mock_client):
+        ai_res = client.post("/api/ai/chat", json={
+            "question": "Hello, what can you help me with?",
+            "context": {"vitals": {"heartRate": 74, "spO2": 98}},
+        }, headers=auth_headers)
+        assert ai_res.status_code == 200, f"AI chat failed: {ai_res.text}"
+        data = ai_res.json()
+        assert data["source"] == "gemini"
+        assert "LifeShield Companion" in data["reply"]
+        assert "disclaimer" in data
+
+
+def test_ai_assistant_openai_mocked_success(auth_headers):
+    """Verifies that when Gemini is unavailable and OpenAI responds successfully, the reply and source 'openai' are returned."""
+    mock_response = MagicMock()
+    mock_response.output_text = "Hello! I am LifeShield Companion. Your recorded heart rate of 74 BPM is within the normal resting range."
+
+    mock_client = MagicMock()
+    mock_client.responses.create = AsyncMock(return_value=mock_response)
+
+    with patch("app.ai_service.get_gemini_client", return_value=None), \
+         patch("app.ai_service.get_openai_client", return_value=mock_client):
+        ai_res = client.post("/api/ai/chat", json={
+            "question": "Hello, what can you help me with?",
+            "context": {"vitals": {"heartRate": 74, "spO2": 98}},
+        }, headers=auth_headers)
+        assert ai_res.status_code == 200, f"AI chat failed: {ai_res.text}"
+        data = ai_res.json()
+        assert data["source"] == "openai"
+        assert "LifeShield Companion" in data["reply"]
+        assert "disclaimer" in data
+
+
+def test_ai_assistant_missing_key_clean_error(auth_headers):
+    """Verifies that if neither Gemini nor OpenAI is configured, a clean error without secrets is returned."""
+    with patch("app.ai_service.get_settings") as mock_settings:
+        mock_settings.return_value.gemini_api_key = None
+        mock_settings.return_value.openai_api_key = None
+        ai_res = client.post("/api/ai/chat", json={
+            "question": "What is my heart rate?",
+        }, headers=auth_headers)
+        assert ai_res.status_code == 200
+        data = ai_res.json()
+        assert data["source"] == "ai_not_configured"
+        assert "not configured" in data["reply"]
+        # Ensure no secrets or API keys are leaked
+        assert "sk-" not in data["reply"]
+        assert "AIza" not in data["reply"]
+
+
+def test_ai_assistant_emergency_guidance(auth_headers):
+    """Verifies that severe symptoms advise the user to seek emergency help or press SOS."""
+    ai_res = client.post("/api/ai/chat", json={
+        "question": "I have severe chest pain and can't breathe, is it an emergency?",
+    }, headers=auth_headers)
+    assert ai_res.status_code == 200
+    data = ai_res.json()
+    assert any(k in data["reply"] for k in ["SOS", "112", "emergency", "108"])
+
 
 
 def test_timeline(auth_headers):

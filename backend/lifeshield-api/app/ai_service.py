@@ -1,29 +1,78 @@
 """
 Server-side AI Assistant Service for LifeShield.
-Supports Gemini, OpenAI, or an intelligent clinical-safety reasoning fallback.
+Supports Google Gemini as primary provider, OpenAI as secondary provider,
+and an intelligent clinical-safety reasoning fallback engine.
 Strictly enforces medical non-diagnosis and non-prescription rules.
 """
 from __future__ import annotations
+import asyncio
+import json
 import logging
 from typing import Any, Dict, Optional
-import httpx
+from google import genai
+from google.genai import types
+import openai
+from openai import AsyncOpenAI
 from .config import get_settings
 
 logger = logging.getLogger("lifeshield.ai")
-settings = get_settings()
 
-SYSTEM_SAFETY_PROMPT = """
-You are LifeShield AI, a helpful health, environmental, and emergency companion.
-Your role is to explain health metrics, environmental risks, medicine reminder schedules, and emergency features clearly and empathetically.
+LIFESHIELD_SYSTEM_INSTRUCTIONS = """You are LifeShield Companion, the AI assistant inside the LifeShield personal health and environmental risk monitoring application.
 
-STRICT CLINICAL SAFETY RULES:
-1. You MUST NOT diagnose illnesses, syndromes, or medical conditions.
-2. You MUST NOT prescribe or adjust medications or dosages.
-3. You MUST NOT pretend to be a licensed physician or replace professional clinical care.
-4. You MUST NOT invent fake health readings or medical facts.
-5. If the user mentions severe chest pain, sudden numbness, difficulty breathing, or an emergency, immediately instruct them to trigger the SOS button or dial emergency services (112/108/911).
-6. Always maintain a calm, empowering, and helpful tone.
-"""
+Help users understand their LifeShield information, including:
+
+* heart rate
+* SpO2
+* steps
+* hydration
+* sleep
+* body/skin temperature
+* heat index
+* AQI
+* flood risk
+* environmental conditions
+* overall risk score
+* risk level
+* recommendations
+
+Use simple, clear language.
+
+Do not invent health readings or environmental readings.
+
+If real wearable or Health Connect data is unavailable and LifeShield is displaying demo/simulated values, clearly identify them as demo/simulated data. Never claim demo or simulated vitals are real.
+
+Do not claim to diagnose medical conditions or prescribe medications/treatments. You do not replace a medical doctor or emergency services.
+
+For potentially serious or emergency symptoms (such as acute chest pain, severe shortness of breath, sudden numbness, high fever, or severe dizziness), advise the user to seek immediate professional/emergency assistance (such as pressing the red LifeShield SOS button or calling local emergency services like 112, 108, or 911) rather than presenting the chatbot response as a diagnosis.
+
+Only use LifeShield data supplied by the backend."""
+
+# Retain backward-compatible alias
+SYSTEM_SAFETY_PROMPT = LIFESHIELD_SYSTEM_INSTRUCTIONS
+
+
+def get_gemini_client() -> Optional[genai.Client]:
+    """
+    Initializes the official Google GenAI Python SDK client using backend settings.
+    Never exposes or logs the API key.
+    """
+    current_settings = get_settings()
+    api_key = current_settings.gemini_api_key
+    if not api_key or not api_key.strip():
+        return None
+    return genai.Client(api_key=api_key.strip())
+
+
+def get_openai_client() -> Optional[AsyncOpenAI]:
+    """
+    Initializes the official OpenAI Python SDK client using backend settings.
+    Never exposes or logs the API key.
+    """
+    current_settings = get_settings()
+    api_key = current_settings.openai_api_key
+    if not api_key or not api_key.strip():
+        return None
+    return AsyncOpenAI(api_key=api_key.strip(), max_retries=0, timeout=6.0)
 
 
 def _clinical_safety_fallback(question: str, context: Optional[Dict[str, Any]] = None) -> str:
@@ -95,7 +144,7 @@ def _clinical_safety_fallback(question: str, context: Optional[Dict[str, Any]] =
         return "🫁 SpO₂ Oxygen Saturation: Connect a compatible Bluetooth pulse oximeter or supported health sensor in the Health section to monitor your blood oxygen."
 
     # 4. Steps & Activity
-    if any(w in q for w in ["step", "walking", "activity", "exercise", "कदम", "अడుగులు"]):
+    if any(w in q for w in ["step", "walking", "activity", "exercise", "कदम", "అడుగులు"]):
         if steps is not None:
             if lang == "hi":
                 return f"👣 आपने आज {steps:,} कदम पूरे किए हैं। नियमित पैदल चलना स्वास्थ्य के लिए लाभदायक है।"
@@ -233,55 +282,124 @@ async def generate_ai_response(
     context: Optional[Dict[str, Any]] = None
 ) -> tuple[str, str]:
     """
-    Attempts to query Gemini/OpenAI if configured, otherwise utilizes
-    the built-in clinical safety domain reasoning engine.
+    Connects to AI providers with the following priority:
+    1. Google Gemini if GEMINI_API_KEY is configured.
+    2. OpenAI if Gemini is unavailable or not configured, and OPENAI_API_KEY is configured.
+    3. Clinical safety fallback engine if neither provider is configured or if errors occur.
+    Never logs or exposes API keys or authorization credentials.
     """
-    # 1. Try Gemini if API key is present
-    if settings.gemini_api_key:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={settings.gemini_api_key}"
-                prompt_text = (
-                    f"{SYSTEM_SAFETY_PROMPT}\n\n"
-                    f"User Context:\n{context}\n\n"
-                    f"User Question: {question}"
+    current_settings = get_settings()
+
+    has_gemini = bool(current_settings.gemini_api_key and current_settings.gemini_api_key.strip())
+    has_openai = bool(current_settings.openai_api_key and current_settings.openai_api_key.strip())
+
+    if not has_gemini and not has_openai:
+        logger.warning("Neither Gemini nor OpenAI API key is configured in backend environment.")
+        return (
+            "The LifeShield AI service is not configured. Please set the GEMINI_API_KEY environment variable in the backend environment.",
+            "ai_not_configured"
+        )
+
+    # Build structured context string
+    context_data = context or {}
+    try:
+        context_str = json.dumps(context_data, indent=2, default=str)
+    except Exception:
+        context_str = str(context_data)
+
+    user_input_content = (
+        f"LIFESHIELD USER CONTEXT DATA:\n{context_str}\n\n"
+        f"USER QUESTION:\n{question.strip()}"
+    )
+
+    # -------------------------------------------------------------------------
+    # 1. Primary Provider: Google Gemini
+    # -------------------------------------------------------------------------
+    if has_gemini:
+        gemini_client = get_gemini_client()
+        if gemini_client:
+            primary_model = current_settings.gemini_model or "gemini-3.6-flash"
+            models_to_try = [primary_model]
+            if primary_model != "gemini-3.5-flash-lite":
+                models_to_try.append("gemini-3.5-flash-lite")
+
+            for model_name in models_to_try:
+                try:
+                    chat = gemini_client.aio.chats.create(
+                        model=model_name,
+                        config=types.GenerateContentConfig(
+                            system_instruction=LIFESHIELD_SYSTEM_INSTRUCTIONS,
+                            temperature=0.2,
+                        )
+                    )
+                    response = await asyncio.wait_for(
+                        chat.send_message(user_input_content),
+                        timeout=7.0
+                    )
+                    reply_text = ""
+                    if hasattr(response, "text") and response.text:
+                        reply_text = response.text.strip()
+
+                    if reply_text:
+                        return reply_text, "gemini"
+                except Exception as exc:
+                    # Never log API keys or credentials
+                    logger.warning(
+                        "Gemini model '%s' call encountered an issue (%s). Checking next fallback.",
+                        model_name,
+                        exc.__class__.__name__
+                    )
+
+    # -------------------------------------------------------------------------
+    # 2. Secondary Provider: OpenAI
+    # -------------------------------------------------------------------------
+    if has_openai:
+        openai_client = get_openai_client()
+        if openai_client:
+            try:
+                model_name = current_settings.openai_model or "gpt-4o-mini"
+                response = await openai_client.responses.create(
+                    model=model_name,
+                    instructions=LIFESHIELD_SYSTEM_INSTRUCTIONS,
+                    input=user_input_content,
                 )
-                payload = {
-                    "contents": [{"parts": [{"text": prompt_text}]}]
-                }
-                res = await client.post(url, json=payload)
-                if res.status_code == 200:
-                    data = res.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        reply = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if reply:
-                            return reply.strip(), "gemini"
-        except Exception as exc:
-            logger.warning("Gemini API call failed: %s. Falling back to safety engine.", exc)
 
-    # 2. Try OpenAI if API key is present
-    if settings.openai_api_key:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
-                payload = {
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_SAFETY_PROMPT},
-                        {"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"}
-                    ],
-                    "temperature": 0.4
-                }
-                res = await client.post(url, json=payload, headers=headers)
-                if res.status_code == 200:
-                    data = res.json()
-                    reply = data["choices"][0]["message"]["content"]
-                    return reply.strip(), "openai"
-        except Exception as exc:
-            logger.warning("OpenAI API call failed: %s. Falling back to safety engine.", exc)
+                reply_text = ""
+                if hasattr(response, "output_text") and response.output_text:
+                    reply_text = response.output_text.strip()
+                elif hasattr(response, "output") and response.output:
+                    chunks = []
+                    for item in response.output:
+                        if hasattr(item, "content"):
+                            for c in item.content:
+                                if hasattr(c, "text"):
+                                    chunks.append(c.text)
+                    reply_text = "".join(chunks).strip()
 
-    # 3. Built-in Clinical Safety Reasoning Engine
-    reply = _clinical_safety_fallback(question, context)
-    return reply, "clinical_safety_engine"
+                if not reply_text and hasattr(response, "choices") and response.choices:
+                    reply_text = response.choices[0].message.content.strip()
+
+                if reply_text:
+                    return reply_text, "openai"
+
+            except openai.OpenAIError as exc:
+                logger.warning(
+                    "OpenAI API call encountered an issue (%s). Activating LifeShield clinical safety fallback.",
+                    exc.__class__.__name__
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unexpected error during OpenAI generation (%s). Activating LifeShield clinical safety fallback.",
+                    exc.__class__.__name__
+                )
+
+    # -------------------------------------------------------------------------
+    # 3. Clinical Safety Engine Fallback
+    # -------------------------------------------------------------------------
+    fallback_reply = _clinical_safety_fallback(question, context)
+    if fallback_reply:
+        return fallback_reply, "clinical_safety_engine"
+    return (
+        "LifeShield AI is currently experiencing high demand or temporary unavailability. For any acute symptoms, please consult a medical professional or press SOS for emergency assistance.",
+        "service_unavailable"
+    )

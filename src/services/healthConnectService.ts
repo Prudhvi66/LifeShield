@@ -1,4 +1,5 @@
 import { registerPlugin, Capacitor } from '@capacitor/core';
+import { HealthConnectMetricDetail, formatHumanSourceLabel } from './wearableSource';
 
 export interface HealthConnectPluginInterface {
   checkAvailability(): Promise<{
@@ -32,6 +33,13 @@ export interface HealthConnectPluginInterface {
       steps: number | null;
       sleep: number | null;
       temperature: number | null;
+    };
+    metrics?: {
+      heart_rate: HealthConnectMetricDetail;
+      spo2: HealthConnectMetricDetail;
+      steps: HealthConnectMetricDetail;
+      sleep: HealthConnectMetricDetail;
+      temperature: HealthConnectMetricDetail;
     };
     message: string;
     source: string;
@@ -107,7 +115,7 @@ export class HealthConnectService {
         success: false,
         hasData: false,
         data: null,
-        message: 'Running in Web environment. Health Connect sync requires Android device. Please use Web Bluetooth GATT or Manual Telemetry.',
+        message: 'Web Preview: Open the LifeShield Android app to sync wearable health data via Health Connect.',
       };
     }
 
@@ -148,14 +156,142 @@ export class HealthConnectService {
         success: true,
         hasData: res.hasData,
         data: res.data,
+        metrics: res.metrics,
         message: res.message,
+        source: formatHumanSourceLabel(res.source),
       };
     } catch (e: any) {
       return {
         success: false,
         hasData: false,
         data: null,
+        metrics: undefined,
         message: 'Health Connect sync error: ' + (e.message || String(e)),
+        source: 'Health Connect',
+      };
+    }
+  }
+
+  public static async readAggregatedData(): Promise<{
+    permissionsGranted: boolean;
+    hasData: boolean;
+    data: {
+      heart_rate: number | null;
+      spo2: number | null;
+      steps: number | null;
+      sleep: number | null;
+      temperature: number | null;
+    };
+    metrics?: {
+      heart_rate: HealthConnectMetricDetail;
+      spo2: HealthConnectMetricDetail;
+      steps: HealthConnectMetricDetail;
+      sleep: HealthConnectMetricDetail;
+      temperature: HealthConnectMetricDetail;
+    };
+    message: string;
+    source: string;
+  }> {
+    if (!this.isNativeAndroid()) {
+      return {
+        permissionsGranted: false,
+        hasData: false,
+        data: { heart_rate: null, spo2: null, steps: null, sleep: null, temperature: null },
+        metrics: undefined,
+        message: 'Native Android required',
+        source: 'Web Preview',
+      };
+    }
+    try {
+      const res = await HealthConnectNative.readAggregatedData();
+      return {
+        ...res,
+        source: formatHumanSourceLabel(res?.source),
+      };
+    } catch (e: any) {
+      return {
+        permissionsGranted: false,
+        hasData: false,
+        data: { heart_rate: null, spo2: null, steps: null, sleep: null, temperature: null },
+        metrics: undefined,
+        message: e.message || 'Could not read Health Connect data.',
+        source: 'Health Connect',
+      };
+    }
+  }
+
+  public static async getPermissionsSummary(): Promise<{
+    isAndroid: boolean;
+    allGranted: boolean;
+    grantedCount: number;
+    totalCount: number;
+    details: {
+      heartRate: boolean;
+      steps: boolean;
+      sleep: boolean;
+      spo2: boolean;
+      temperature: boolean;
+    };
+    missing: string[];
+  }> {
+    const totalCount = 5;
+    if (!this.isNativeAndroid()) {
+      return {
+        isAndroid: false,
+        allGranted: false,
+        grantedCount: 0,
+        totalCount,
+        details: {
+          heartRate: false,
+          steps: false,
+          sleep: false,
+          spo2: false,
+          temperature: false,
+        },
+        missing: ['Android device required'],
+      };
+    }
+
+    try {
+      const perms = await HealthConnectNative.checkPermissions();
+      const p = perms.permissions || {};
+      const heartRate = Boolean(p['READ_HEART_RATE']);
+      const steps = Boolean(p['READ_STEPS']);
+      const sleep = Boolean(p['READ_SLEEP']);
+      const spo2 = Boolean(p['READ_OXYGEN_SATURATION']);
+      const temperature = Boolean(p['READ_BODY_TEMPERATURE']);
+
+      const missing: string[] = [];
+      if (!heartRate) missing.push('Heart Rate');
+      if (!steps) missing.push('Steps');
+      if (!sleep) missing.push('Sleep');
+      if (!spo2) missing.push('Blood Oxygen (SpO2)');
+      if (!temperature) missing.push('Body Temperature');
+
+      const grantedCount = (heartRate ? 1 : 0) + (steps ? 1 : 0) + (sleep ? 1 : 0) + (spo2 ? 1 : 0) + (temperature ? 1 : 0);
+
+      return {
+        isAndroid: true,
+        allGranted: grantedCount === totalCount,
+        grantedCount,
+        totalCount,
+        details: { heartRate, steps, sleep, spo2, temperature },
+        missing,
+      };
+    } catch {
+      return {
+        isAndroid: true,
+        allGranted: false,
+        grantedCount: 0,
+        totalCount,
+        details: {
+          heartRate: false,
+          steps: false,
+          sleep: false,
+          spo2: false,
+          temperature: false,
+        },
+        missing: ['Could not verify permissions'],
       };
     }
   }

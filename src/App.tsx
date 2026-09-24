@@ -21,7 +21,8 @@ import { RiskAnalysisView } from "./components/risk/RiskAnalysisView";
 import { WearablesView } from "./components/wearables/WearablesView";
 import { HealthHistoryView } from "./components/history/HealthHistoryView";
 import { AlertsView } from "./components/alerts/AlertsView";
-import { SettingsView } from "./components/settings/SettingsView";
+import { HealthConnectMetricDetail, formatTimeAgo, formatHumanSourceLabel, formatHealthConnectStatus } from "./services/wearableSource";
+import { demoHealthService, DataSourceStatus } from "./services/demoHealthData";
 
 type Tab =
   | "home"
@@ -62,6 +63,9 @@ type HealthData = {
   hydration?: number | null;
   systolic_bp?: number | null;
   diastolic_bp?: number | null;
+  calories?: number | null;
+  respiratory_rate?: number | null;
+  activity?: string | null;
   source?: string | null;
   timestamp?: string | null;
 };
@@ -120,26 +124,38 @@ type ChatMessage = {
   source?: string;
 };
 
+export type HealthDataSource = "real" | "demo" | "unavailable" | "not_connected";
+
+export const EMPTY_HEALTH_VITALS: HealthData = {
+  heart_rate: null,
+  spo2: null,
+  temperature: null,
+  steps: null,
+  sleep: null,
+  hydration: null,
+  systolic_bp: null,
+  diastolic_bp: null,
+  calories: null,
+  respiratory_rate: null,
+  activity: null,
+  source: null,
+  timestamp: null,
+};
+
 export function App() {
   // Navigation
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [activeModal, setActiveModal] = useState<ActiveModal>("none");
 
-  // Core Application State
-  // Initialize with demo vitals so dashboard always has values to display.
-  // These get replaced with real data when backend/sync provides it.
-  const [health, setHealth] = useState<HealthData>({
-    heart_rate: 72,
-    spo2: 98,
-    temperature: 36.6,
-    steps: 4250,
-    sleep: 7.33,
-    hydration: 55,
-    systolic_bp: 118,
-    diastolic_bp: 76,
-    source: "Demo Data (Web Simulation)",
-    timestamp: new Date().toISOString(),
-  });
+  // Core Application State - Live telemetry when available or honest labeled demo vitals
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => demoHealthService.isDemoModeEnabled());
+  const [dataSource, setDataSource] = useState<HealthDataSource>(() =>
+    demoHealthService.isDemoModeEnabled() ? "demo" : "not_connected"
+  );
+  const [health, setHealth] = useState<HealthData>(() =>
+    demoHealthService.isDemoModeEnabled() ? demoHealthService.getDemoHealthData() : EMPTY_HEALTH_VITALS
+  );
+  const [isAuthBootstrapping, setIsAuthBootstrapping] = useState<boolean>(() => Boolean(apiClient.getToken()));
   const [environment, setEnvironment] = useState<EnvironmentData>({});
   const [envLoading, setEnvLoading] = useState<boolean>(false);
   const [envError, setEnvError] = useState<boolean>(false);
@@ -172,11 +188,18 @@ export function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [bleStatus, setBleStatus] = useState<BLEDeviceStatus>({ isConnected: false });
   const [isScanningBle, setIsScanningBle] = useState(false);
+  const [isBleLive, setIsBleLive] = useState(false);
   const [healthConnectStatus, setHealthConnectStatus] = useState<string>("Ready to check");
+  const [healthConnectMetrics, setHealthConnectMetrics] = useState<{
+    heart_rate: HealthConnectMetricDetail;
+    spo2: HealthConnectMetricDetail;
+    steps: HealthConnectMetricDetail;
+    sleep: HealthConnectMetricDetail;
+    temperature: HealthConnectMetricDetail;
+  } | undefined>(undefined);
   const [isSyncingHealthConnect, setIsSyncingHealthConnect] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [statusToast, setStatusToast] = useState<{ message: string; type: "info" | "success" | "warning" } | null>(null);
-  const [dataSource, setDataSource] = useState<"real" | "demo" | "mixed">("demo");
 
   // Permission Setup (first-launch flow)
   const [needsPermissionSetup, setNeedsPermissionSetup] = useState(() => {
@@ -220,6 +243,7 @@ export function App() {
     callResults?: Array<{ target: string; number: string; status: string; detail: string }>;
     smsResults?: Array<{ target: string; number: string; status: string; detail: string }>;
     smsStatus?: string;
+    telephonyLive?: boolean;
   } | null>(null);
   const sosInProgressRef = useRef<boolean>(false);
 
@@ -267,7 +291,9 @@ export function App() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(voiceTtsService.getSettings());
+  const isAiSendingRef = useRef(false);
+  const voiceSettingsState = voiceTtsService.getSettings();
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(voiceSettingsState);
 
   // Forms State
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -406,6 +432,53 @@ export function App() {
     };
   }, []);
 
+  // -------------------------------------------------------------
+  // DEMO DATA MODE SUBSCRIPTION & SUBTLE VALUE PROGRESSION
+  // -------------------------------------------------------------
+  useEffect(() => {
+    const unsub = demoHealthService.subscribe(() => {
+      const isEnabled = demoHealthService.isDemoModeEnabled();
+      setIsDemoMode(isEnabled);
+      setDataSource((prev) => {
+        if (prev === "real" || prev === "unavailable") return prev; // Real hardware always takes precedence!
+        return isEnabled ? "demo" : "not_connected";
+      });
+      setHealth((prev) => {
+        if (!demoHealthService.isDemoModeEnabled()) {
+          return prev.source === "Simulated Demonstration" ? EMPTY_HEALTH_VITALS : prev;
+        }
+        if (prev.source === "Simulated Demonstration" || !prev.source) {
+          return demoHealthService.getDemoHealthData();
+        }
+        return prev;
+      });
+    });
+    return unsub;
+  }, []);
+
+  const handleToggleDemoMode = (enabled: boolean) => {
+    demoHealthService.setDemoModeEnabled(enabled);
+    setIsDemoMode(enabled);
+    if (dataSource === "real") {
+      showToast(
+        enabled
+          ? "Demo Mode set to ON (Real wearable telemetry currently has active priority)"
+          : "Demo Mode turned off",
+        "info"
+      );
+      return;
+    }
+    if (enabled) {
+      setDataSource("demo");
+      setHealth(demoHealthService.getDemoHealthData());
+      showToast("Demo Data Mode activated (Simulated data for presentation)", "info");
+    } else {
+      setDataSource("not_connected");
+      setHealth(EMPTY_HEALTH_VITALS);
+      showToast("Demo Data Mode disabled (Not Connected)", "info");
+    }
+  };
+
   // Check native Android notification permission on mount
   useEffect(() => {
     if (androidNotificationService.isNativeAndroid()) {
@@ -420,13 +493,59 @@ export function App() {
     }
   }, []);
 
-  // Register auth failure handler — clears user state on 401
+  // Register auth failure handler — clears user state on genuine 401
   useEffect(() => {
     apiClient.setAuthFailureHandler(() => {
       setUser(null);
-      showToast("Session expired. Please sign in again.", "warning");
+      setAuthError("Your session has expired. Please log in again.");
+      setActiveModal("auth");
+      showToast("Your session has expired. Please log in again.", "warning");
     });
     return () => apiClient.setAuthFailureHandler(null);
+  }, []);
+
+  // Authentication Bootstrap on App Mount
+  useEffect(() => {
+    const bootstrapAuth = async () => {
+      const token = apiClient.getToken();
+      if (!token) {
+        setIsAuthBootstrapping(false);
+        return;
+      }
+      try {
+        const me = await apiClient.auth.getMe();
+        if (me) {
+          const userData = {
+            id: me.id,
+            email: me.email,
+            full_name: me.full_name,
+            age: me.age,
+            blood_group: me.blood_group,
+            primary_language: me.primary_language,
+          };
+          setUser(userData);
+          apiClient.setStoredUser(userData);
+          console.log("[LifeShield Auth] Session verified on bootstrap for:", me.email);
+        }
+      } catch (err: any) {
+        if (err.message?.includes("401") || !apiClient.getToken()) {
+          console.warn("[LifeShield Auth] Stored session expired or invalid on startup:", err.message);
+          setUser(null);
+          apiClient.clearToken("bootstrap_session_expired");
+          setAuthError("Your session has expired. Please log in again.");
+          showToast("Your session has expired. Please log in again.", "warning");
+        } else {
+          // Temporary network failure or server startup delay: preserve cached session!
+          console.warn("[LifeShield Auth] Backend unavailable during bootstrap, preserving offline session:", err.message);
+          const cached = apiClient.getStoredUser();
+          if (cached) setUser(cached);
+        }
+      } finally {
+        setIsAuthBootstrapping(false);
+      }
+    };
+
+    bootstrapAuth();
   }, []);
 
   // Update browser time every second for diagnostics
@@ -442,7 +561,7 @@ export function App() {
   // INITIALIZATION & REAL DATA SYNC
   // -------------------------------------------------------------
   const loadData = useCallback(async () => {
-    console.log("[LifeShield Health] loadData() starting — demo vitals active until real data arrives");
+    console.log("[LifeShield Health] loadData() starting — evaluating real vs demo data sources");
     setIsRefreshing(true);
     try {
       // 1. Auth & Profile
@@ -469,80 +588,133 @@ export function App() {
         }
       }
 
-      // 2. Health Summary
-      const summary = await apiClient.health.getSummary().catch((err: any) => {
-        console.warn("[LifeShield Health] Health summary unavailable:", err.message);
-        return null;
-      });
+      // 2. Health Data Resolution (Priority: Real Data -> Connected No Data -> Demo Data -> Not Connected)
+      let resolvedDataSource: HealthDataSource = "not_connected";
+      let resolvedHealth: HealthData = EMPTY_HEALTH_VITALS;
+      let resolvedSyncTime: string | null = null;
+      let hasRealHealthData = false;
 
-      // Validate whether the backend reading contains real physiological data.
-      // A reading with heart_rate=0 or all-null fields is NOT real data.
-      const hasValidReading = (s: any): boolean => {
-        if (!s || !s.latest) return false;
-        const l = s.latest;
-        const hr = l.heart_rate;
-        const spo2 = l.spo2;
-        const steps = l.steps;
-        const temp = l.body_temperature;
-        const hasHR = typeof hr === 'number' && hr > 0 && hr < 300;
-        const hasSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
-        const hasSteps = typeof steps === 'number' && steps > 0;
-        const hasTemp = typeof temp === 'number' && temp > 30 && temp < 45;
-        return hasHR || hasSpO2 || hasSteps || hasTemp;
-      };
+      // Check native Android Health Connect first
+      if (HealthConnectService.isNativeAndroid()) {
+        try {
+          const perms = await HealthConnectService.checkPermissions();
+          if (perms.permissionsGranted) {
+            const hcRes = await HealthConnectService.readAggregatedData();
+            if (hcRes.metrics) {
+              setHealthConnectMetrics(hcRes.metrics);
+            }
 
-      if (summary && hasValidReading(summary)) {
-        setBackendOnline(true);
-        const l = summary.latest;
-        const sourceIsReal = l.source && !l.source.toLowerCase().includes("demo");
+            if (hcRes.hasData && hcRes.data) {
+              const hr = hcRes.data.heart_rate;
+              const spo2 = hcRes.data.spo2;
+              const steps = hcRes.data.steps;
+              const sleep = hcRes.data.sleep;
+              const temp = hcRes.data.temperature;
 
-        console.log("[LifeShield Health] Real health data found from backend:", {
-          source: l.source,
-          heart_rate: l.heart_rate,
-          spo2: l.spo2,
-          steps: l.steps,
-          temperature: l.body_temperature,
-        });
+              const hasHR = typeof hr === "number" && hr > 0 && hr < 300;
+              const hasSpO2 = typeof spo2 === "number" && spo2 > 0 && spo2 <= 100;
+              const hasSteps = typeof steps === "number" && steps >= 0;
+              const hasSleep = typeof sleep === "number" && sleep >= 0;
+              const hasTemp = typeof temp === "number" && temp > 30 && temp < 45;
 
-        setHealth({
-          heart_rate: l.heart_rate,
-          spo2: l.spo2,
-          temperature: l.body_temperature,
-          steps: summary.total_steps_today || l.steps,
-          sleep: l.sleep_hours,
-          hydration: l.hydration_index,
-          systolic_bp: l.systolic_bp,
-          diastolic_bp: l.diastolic_bp,
-          source: l.source || "Wearable Device",
-          timestamp: l.timestamp,
-        });
-        setDataSource(sourceIsReal ? "real" : "demo");
-        setLastSyncTime(new Date().toLocaleTimeString());
-        console.log("[LifeShield Health] Using", sourceIsReal ? "REAL" : "DEMO", "vitals");
-      } else {
-        // No valid real device data — keep/use demo vitals
-        if (summary && summary.latest) {
-          console.log("[LifeShield Health] Backend returned reading but it has no valid vital signs (e.g. heart_rate=0). Using DEMO.");
-        } else {
-          console.log("[LifeShield Health] No backend health data available, using DEMO vitals");
+              if (hasHR || hasSpO2 || hasSteps || hasSleep || hasTemp) {
+                hasRealHealthData = true;
+                resolvedDataSource = "real";
+                const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                resolvedSyncTime = timeStr;
+                resolvedHealth = {
+                  heart_rate: hasHR ? hr : null,
+                  spo2: hasSpO2 ? spo2 : null,
+                  steps: hasSteps ? steps : null,
+                  sleep: hasSleep ? sleep : null,
+                  temperature: hasTemp ? temp : null,
+                  hydration: 68,
+                  systolic_bp: null,
+                  diastolic_bp: null,
+                  source: formatHumanSourceLabel(hcRes.source),
+                  timestamp: new Date().toISOString(),
+                };
+                setHealthConnectStatus("Connected — Real Data");
+                console.log("[LifeShield Health] STATE: Connected — Real Data from", hcRes.source);
+              }
+            }
+
+            if (!hasRealHealthData) {
+              // Connected/authorized, but no current health records found yet
+              resolvedDataSource = "unavailable";
+              resolvedHealth = {
+                heart_rate: null,
+                spo2: null,
+                steps: null,
+                sleep: null,
+                temperature: null,
+                hydration: null,
+                systolic_bp: null,
+                diastolic_bp: null,
+                source: "Health Connect",
+                timestamp: null,
+              };
+              setHealthConnectStatus("Connected — No Data");
+              console.log("[LifeShield Health] STATE: Connected — No Data (Health Connect has no current records)");
+            }
+          } else {
+            setHealthConnectStatus("Not Connected");
+          }
+        } catch (hcErr: any) {
+          console.warn("[LifeShield Health] Health Connect check error:", hcErr);
+          setHealthConnectStatus("Not Connected");
         }
-        setBackendOnline(true);
-        setHealth({
-          heart_rate: 72,
-          spo2: 98,
-          temperature: 36.6,
-          steps: 4250,
-          sleep: 7.33,
-          hydration: 55,
-          systolic_bp: 118,
-          diastolic_bp: 76,
-          source: "Demo Data (Web Simulation)",
-          timestamp: new Date().toISOString(),
-        });
-        setDataSource("demo");
-        setLastSyncTime(new Date().toLocaleTimeString() + " (Demo)");
-        console.log("[LifeShield Health] Data source: DEMO");
+      } else {
+        setHealthConnectStatus("Not Connected");
       }
+
+      // Check if Bluetooth GATT is actively streaming live data
+      if (bleStatus.isConnected && isBleLive) {
+        resolvedDataSource = "real";
+        resolvedHealth = {
+          ...resolvedHealth,
+          source: "Bluetooth GATT",
+          timestamp: new Date().toISOString(),
+        };
+      } else if (bleStatus.isConnected && !hasRealHealthData) {
+        resolvedDataSource = "unavailable";
+        resolvedHealth = {
+          heart_rate: null,
+          spo2: null,
+          steps: null,
+          sleep: null,
+          temperature: null,
+          hydration: null,
+          systolic_bp: null,
+          diastolic_bp: null,
+          source: "Bluetooth GATT",
+          timestamp: null,
+        };
+      }
+
+      // Priority 3 & 4: If no real source is active and no device is connected
+      if (!hasRealHealthData && resolvedDataSource !== "unavailable") {
+        if (demoHealthService.isDemoModeEnabled()) {
+          resolvedDataSource = "demo";
+          resolvedHealth = demoHealthService.getDemoHealthData();
+          setHealthConnectStatus((prev) =>
+            prev.includes("Connected") ? "Not Connected" : prev
+          );
+          console.log("[LifeShield Health] STATE: Demo Data Mode active for presentation.");
+        } else {
+          resolvedDataSource = "not_connected";
+          resolvedHealth = EMPTY_HEALTH_VITALS;
+          setHealthConnectStatus((prev) =>
+            prev.includes("Connected") ? "Not Connected" : prev
+          );
+          console.log("[LifeShield Health] STATE: Not Connected (Demo Mode disabled).");
+        }
+      }
+
+      setBackendOnline(true);
+      setHealth(resolvedHealth);
+      setDataSource(resolvedDataSource);
+      setLastSyncTime(resolvedSyncTime);
 
       // 3. Environment (Real Open-Meteo)
       setEnvLoading(true);
@@ -671,9 +843,28 @@ export function App() {
       window.addEventListener("devicemotion", handleMotion);
     }
 
+    // App Resume / Foreground refresh listener:
+    // When user returns from granting permissions in Android Settings or from companion app
+    const handleForegroundResume = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        console.log("[LifeShield Lifecycle] Returned to foreground — auto-checking health permissions & records");
+        loadData();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleForegroundResume);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", handleForegroundResume);
+    }
+
     return () => {
       if (typeof window !== "undefined") {
         window.removeEventListener("devicemotion", handleMotion);
+        window.removeEventListener("focus", handleForegroundResume);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleForegroundResume);
       }
     };
   }, [loadData, fallDetectionActive]);
@@ -995,6 +1186,7 @@ export function App() {
     let locationShared = false;
     let recordedToBackend = false;
     let sosEventId: string | null = null;
+    let telephonyLive = false;
     const callResults: Array<{ target: string; number: string; status: string; detail: string }> = [];
     const smsResults: Array<{ target: string; number: string; status: string; detail: string }> = [];
 
@@ -1049,6 +1241,7 @@ export function App() {
 
         recordedToBackend = true;
         sosEventId = result.id || null;
+        telephonyLive = Boolean(result.telephony_live);
 
         if (gpsData) {
           locationShared = true;
@@ -1187,6 +1380,7 @@ export function App() {
       callResults,
       smsResults,
       smsStatus: overallSmsStatus,
+      telephonyLive,
     });
 
     sosInProgressRef.current = false;
@@ -1201,38 +1395,42 @@ export function App() {
     try {
       const status = await bluetoothService.connect(
         (vitals) => {
+          const hasValidHR = typeof vitals.heartRate === 'number' && vitals.heartRate > 0 && vitals.heartRate < 300;
+          const hasValidSpO2 = typeof vitals.spO2 === 'number' && vitals.spO2 > 0 && vitals.spO2 <= 100;
+          const hasValidTemp = typeof vitals.temperature === 'number' && vitals.temperature > 30 && vitals.temperature < 45;
+
           setHealth((prev) => ({
             ...prev,
-            heart_rate: vitals.heartRate,
-            spo2: vitals.spO2 ?? prev.spo2,
-            source: "Bluetooth Smartwatch (GATT)",
+            heart_rate: hasValidHR ? vitals.heartRate! : prev.heart_rate,
+            spo2: hasValidSpO2 ? vitals.spO2! : prev.spo2,
+            temperature: hasValidTemp ? vitals.temperature! : prev.temperature,
+            source: "Bluetooth GATT",
             timestamp: new Date().toISOString(),
           }));
 
-          // Validate that BLE data contains real physiological values
-          const hasValidHR = typeof vitals.heartRate === 'number' && vitals.heartRate > 0 && vitals.heartRate < 300;
-          const hasValidSpO2 = typeof vitals.spO2 === 'number' && vitals.spO2 > 0 && vitals.spO2 <= 100;
-          const hasRealBleData = hasValidHR || hasValidSpO2;
-          setDataSource(hasRealBleData ? "real" : "demo");
+          setDataSource("real");
+          setIsBleLive(true);
           setLastSyncTime(new Date().toLocaleTimeString());
 
-          console.log("[LifeShield Health] Bluetooth data received:", {
+          console.log("[LifeShield Health] Bluetooth real-time vitals received:", {
             heartRate: vitals.heartRate,
             spO2: vitals.spO2,
-            hasRealBleData,
+            temperature: vitals.temperature,
           });
 
           // Commit reading to database
           apiClient.health
             .ingestReading({
-              heart_rate: vitals.heartRate,
-              spo2: vitals.spO2,
-              source: "Bluetooth Smartwatch",
+              heart_rate: hasValidHR ? vitals.heartRate : undefined,
+              spo2: hasValidSpO2 ? vitals.spO2 : undefined,
+              body_temperature: hasValidTemp ? vitals.temperature : undefined,
+              source: "Bluetooth GATT",
             })
             .catch(() => { });
         },
         () => {
           setBleStatus({ isConnected: false });
+          setIsBleLive(false);
           showToast("Bluetooth Smartwatch disconnected.", "warning");
         }
       );
@@ -1240,8 +1438,9 @@ export function App() {
       setIsScanningBle(false);
       setBleStatus(status);
       if (status.isConnected) {
+        setIsBleLive(true);
         setLastSyncTime(new Date().toLocaleTimeString());
-        showToast(`Connected to ${status.deviceName || "Heart Rate Monitor"}`, "success");
+        showToast(`Connected to ${status.deviceName || "BLE Health Device"}`, "success");
       } else if (status.errorMessage) {
         showToast(status.errorMessage, "warning");
       }
@@ -1251,72 +1450,103 @@ export function App() {
     }
   };
 
+  const handleDisconnectSmartwatch = async () => {
+    try {
+      await bluetoothService.disconnect();
+    } catch { /* ignore */ }
+    setBleStatus({ isConnected: false });
+    setIsBleLive(false);
+    showToast("Bluetooth Smartwatch disconnected.", "info");
+    loadData();
+  };
+
   // -------------------------------------------------------------
   // REAL ANDROID HEALTH CONNECT SYNC
   // -------------------------------------------------------------
   const handleHealthConnectSync = async () => {
     setIsSyncingHealthConnect(true);
-    setHealthConnectStatus("Checking Health Connect availability & permissions...");
+    setHealthConnectStatus("Querying Health Connect records...");
 
     try {
       const syncResult = await HealthConnectService.syncRealData();
 
+      if (syncResult.metrics) {
+        setHealthConnectMetrics(syncResult.metrics);
+      }
+
       if (syncResult.success) {
-        setHealthConnectStatus(syncResult.message);
-        setLastSyncTime(new Date().toLocaleTimeString());
+        const syncTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        setLastSyncTime(syncTimeStr);
 
         if (syncResult.hasData && syncResult.data) {
-          // Validate that returned values are actually valid physiological readings.
-          // heart_rate=0, spo2=0, steps=0 are NOT real data.
           const hr = syncResult.data.heart_rate;
           const spo2 = syncResult.data.spo2;
           const steps = syncResult.data.steps;
           const temp = syncResult.data.temperature;
+          const sleep = syncResult.data.sleep;
+
           const hasValidHR = typeof hr === 'number' && hr > 0 && hr < 300;
           const hasValidSpO2 = typeof spo2 === 'number' && spo2 > 0 && spo2 <= 100;
-          const hasValidSteps = typeof steps === 'number' && steps > 0;
+          const hasValidSteps = typeof steps === 'number' && steps >= 0;
           const hasValidTemp = typeof temp === 'number' && temp > 30 && temp < 45;
-          const hasAnyRealData = hasValidHR || hasValidSpO2 || hasValidSteps || hasValidTemp;
+          const hasValidSleep = typeof sleep === 'number' && sleep >= 0;
 
-          console.log("[LifeShield Health] Health Connect sync result:", {
-            hasAnyRealData,
-            heart_rate: hr,
-            spo2: spo2,
-            steps: steps,
-            temperature: temp,
+          let updatedMetricsCount = 0;
+          if (hasValidHR) updatedMetricsCount++;
+          if (hasValidSpO2) updatedMetricsCount++;
+          if (hasValidSteps) updatedMetricsCount++;
+          if (hasValidSleep) updatedMetricsCount++;
+          if (hasValidTemp) updatedMetricsCount++;
+
+          setHealth({
+            heart_rate: hasValidHR ? hr : null,
+            spo2: hasValidSpO2 ? spo2 : null,
+            steps: hasValidSteps ? steps : null,
+            sleep: hasValidSleep ? sleep : null,
+            temperature: hasValidTemp ? temp : null,
+            hydration: 68,
+            systolic_bp: null,
+            diastolic_bp: null,
+            source: formatHumanSourceLabel((syncResult as any).source),
+            timestamp: new Date().toISOString(),
           });
 
-          setHealth((prev) => ({
-            ...prev,
-            heart_rate: syncResult.data.heart_rate ?? prev.heart_rate,
-            spo2: syncResult.data.spo2 ?? prev.spo2,
-            steps: syncResult.data.steps ?? prev.steps,
-            sleep: syncResult.data.sleep ?? prev.sleep,
-            temperature: syncResult.data.temperature ?? prev.temperature,
-            source: "Android Health Connect",
-            timestamp: new Date().toISOString(),
-          }));
-          setDataSource(hasAnyRealData ? "real" : "demo");
+          setDataSource("real");
+          setHealthConnectStatus("Connected — Real Data");
 
           // Ingest into backend database
           await apiClient.health.ingestReading({
-            heart_rate: syncResult.data.heart_rate || undefined,
-            spo2: syncResult.data.spo2 || undefined,
-            steps: syncResult.data.steps || undefined,
-            sleep_hours: syncResult.data.sleep || undefined,
-            body_temperature: syncResult.data.temperature || undefined,
+            heart_rate: hasValidHR ? hr : undefined,
+            spo2: hasValidSpO2 ? spo2 : undefined,
+            steps: hasValidSteps ? steps : undefined,
+            sleep_hours: hasValidSleep ? sleep : undefined,
+            body_temperature: hasValidTemp ? temp : undefined,
             source: "Android Health Connect",
-          });
+          }).catch(() => {});
 
-          console.log("[LifeShield Health] Data source:", hasAnyRealData ? "REAL" : "DEMO");
-          showToast("Real health metrics synchronized from Health Connect!", "success");
+          showToast(`Health Connect Synced: ${updatedMetricsCount} health metrics updated (Last synced: ${syncTimeStr})`, "success");
         } else {
-          setDataSource("demo");
-          showToast(syncResult.message, "info");
-          console.log("[LifeShield Health] Health Connect returned no data, using DEMO");
+          // STATE 2: Connected, but no usable health records
+          setDataSource("unavailable");
+          setHealth({
+            heart_rate: null,
+            spo2: null,
+            steps: null,
+            sleep: null,
+            temperature: null,
+            hydration: null,
+            systolic_bp: null,
+            diastolic_bp: null,
+            source: "Health Connect",
+            timestamp: null,
+          });
+          const emptyMsg = "Connected — No Data: Device connected, but no current health data is available in Health Connect.";
+          setHealthConnectStatus("Connected — No Data");
+          showToast(emptyMsg, "info");
         }
       } else {
-        setHealthConnectStatus(syncResult.message);
+        const isPerm = syncResult.message?.toLowerCase().includes("permission");
+        setHealthConnectStatus(isPerm ? "Permission Required" : formatHealthConnectStatus(syncResult.message));
         showToast(syncResult.message, "warning");
       }
     } catch (err: any) {
@@ -1462,6 +1692,18 @@ export function App() {
     } catch (err: any) {
       showToast("Could not log action: " + err.message, "warning");
     }
+  };
+
+  const handleDeleteReminder = async (id: string) => {
+    if (apiClient.getToken()) {
+      try {
+        await apiClient.reminders.delete(id);
+      } catch (err: any) {
+        console.warn("Backend reminder delete skipped:", err?.message);
+      }
+    }
+    setReminders((prev) => prev.filter((r) => r.id !== id));
+    showToast("Reminder removed.", "info");
   };
 
   // -------------------------------------------------------------
@@ -1635,7 +1877,8 @@ export function App() {
   // -------------------------------------------------------------
   const handleSendAiMessage = async (textToSend?: string) => {
     const text = textToSend || chatInput;
-    if (!text.trim() || isAiLoading) return;
+    if (!text.trim() || isAiLoading || isAiSendingRef.current) return;
+    isAiSendingRef.current = true;
 
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
@@ -1660,6 +1903,7 @@ export function App() {
         },
       ]);
       setIsAiLoading(false);
+      isAiSendingRef.current = false;
       setActiveModal("auth");
       return;
     }
@@ -1667,37 +1911,109 @@ export function App() {
     try {
       const response = await apiClient.ai.chat(text.trim(), {
         language: voiceSettings.language,
-        include_vitals: true,
-        include_environment: true,
+        dataSource: dataSource,
+        vitals: {
+          heartRate: health.heart_rate,
+          spO2: health.spo2,
+          steps: health.steps,
+          bodyTemperature: health.temperature,
+          sleepHours: health.sleep,
+          systolicBp: health.systolic_bp,
+          diastolicBp: health.diastolic_bp,
+          hydrationIndex: health.hydration,
+          isDemo: dataSource === "demo",
+          dataSourceStatus:
+            dataSource === "real"
+              ? "CONNECTED_REAL_DATA"
+              : dataSource === "demo"
+              ? "DEMO_DATA"
+              : dataSource === "unavailable"
+              ? "CONNECTED_NO_DATA"
+              : "NOT_CONNECTED",
+          simulationNote:
+            dataSource === "demo"
+              ? "These are simulated demo readings for presentation/testing. Not from a real wearable."
+              : undefined,
+        },
+        environment: {
+          region: selectedRegion,
+          temperature: environment.temperature,
+          aqi: environment.aqi,
+          heatIndex: environment.heat_index,
+          floodRisk: environment.flood_risk_level,
+          humidity: environment.humidity,
+        },
+        reminders: reminders.map((r) => ({
+          title: r.title,
+          time: r.time,
+          dosage: r.dosage,
+          type: r.reminder_type,
+        })),
       });
+
+      const replyText = response.reply || (response as any).message || (response as any).text || '';
 
       const assistantMsg: ChatMessage = {
         id: `ai-${Date.now()}`,
         sender: "assistant",
-        text: response.reply,
+        text: replyText,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        source: response.source || "clinical_safety_engine",
+        source: response.source || "gemini",
       };
 
       setChatMessages((prev) => [...prev, assistantMsg]);
 
       // Speak AI response if master voice is enabled
-      if (voiceSettings.masterVoiceEnabled) {
-        voiceTtsService.speakRaw(response.reply, voiceSettings.language);
+      if (voiceSettings.masterVoiceEnabled && replyText) {
+        voiceTtsService.speakRaw(replyText, voiceSettings.language);
       }
     } catch (err: any) {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `ai-err-${Date.now()}`,
-          sender: "assistant",
-          text: "I am unable to reach the clinical reasoning backend right now. Please verify your connection or consult emergency services directly at 112 / 108.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          source: "offline_fallback",
-        },
-      ]);
+      const is422 = err?.status === 422 || (typeof err?.message === 'string' && (err.message.includes('422') || err.message.includes('Field required') || err.message.includes('json_invalid')));
+      const isNetworkFailure = !err?.status || err?.status === 0 || err?.name === 'AbortError' || (typeof err?.message === 'string' && (
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('unreachable') ||
+        err.message.includes('aborted')
+      ));
+
+      if (is422) {
+        console.error('[LifeShield AI] Request validation error (HTTP 422):', err?.message);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-err-${Date.now()}`,
+            sender: "assistant",
+            text: `Request validation error: ${err.message || 'Invalid request schema'}. Please verify the question parameter format.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "schema_validation_error",
+          },
+        ]);
+      } else if (isNetworkFailure) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-err-${Date.now()}`,
+            sender: "assistant",
+            text: "I am unable to reach the clinical reasoning backend right now. Please verify your connection or consult emergency services directly at 112 / 108.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "offline_fallback",
+          },
+        ]);
+      } else {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-err-${Date.now()}`,
+            sender: "assistant",
+            text: `LifeShield AI error: ${err.message || "An unexpected error occurred."}`,
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            source: "error",
+          },
+        ]);
+      }
     } finally {
       setIsAiLoading(false);
+      isAiSendingRef.current = false;
     }
   };
 
@@ -1713,6 +2029,9 @@ export function App() {
 
   // Multi-factor transparent risk score calculation
   const calculateRiskScore = () => {
+    if (dataSource === "not_connected") {
+      return { score: 0, factors: [] };
+    }
     let score = 8; // Baseline healthy score
     let factors: string[] = [];
 
@@ -1784,7 +2103,15 @@ export function App() {
   const currentRiskScore = riskCalc.score;
   const riskFactors = riskCalc.factors;
   const riskTier =
-    currentRiskScore >= 70 ? "Critical" : currentRiskScore >= 45 ? "High" : currentRiskScore >= 25 ? "Moderate" : "Low";
+    dataSource === "not_connected"
+      ? "Inactive"
+      : currentRiskScore >= 70
+      ? "Critical"
+      : currentRiskScore >= 45
+      ? "High"
+      : currentRiskScore >= 25
+      ? "Moderate"
+      : "Low";
 
   return (
     <div className="lifeshield-app">
@@ -1849,6 +2176,58 @@ export function App() {
       {/* Permission Setup Screen (first launch) */}
       {needsPermissionSetup && (
         <PermissionSetupScreen onComplete={() => setNeedsPermissionSetup(false)} />
+      )}
+
+      {/* Session Bootstrap Overlay */}
+      {isAuthBootstrapping && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(248, 246, 255, 0.96)",
+            backdropFilter: "blur(6px)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+        >
+          <div
+            style={{
+              width: "56px",
+              height: "56px",
+              borderRadius: "20px",
+              background: "linear-gradient(135deg, #7c3aed, #4f46e5)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#fff",
+              fontSize: "26px",
+              boxShadow: "0 10px 25px rgba(124, 58, 237, 0.35)",
+              marginBottom: "20px",
+            }}
+          >
+            ♥
+          </div>
+          <div
+            style={{
+              width: "36px",
+              height: "36px",
+              borderRadius: "50%",
+              border: "3px solid #e2e8f0",
+              borderTopColor: "#7c3aed",
+              animation: "spin 0.8s linear infinite",
+              marginBottom: "16px",
+            }}
+          />
+          <strong style={{ fontSize: "16px", color: "#1e1b4b", marginBottom: "6px" }}>
+            Restoring your LifeShield session...
+          </strong>
+          <span style={{ fontSize: "12px", color: "#64748b" }}>
+            Verifying secure clinical credentials
+          </span>
+        </div>
       )}
 
       {/* =========================================================
@@ -1928,6 +2307,8 @@ export function App() {
             onRegionChange={setSelectedRegion}
             envLoading={envLoading}
             envError={envError}
+            isDemoMode={isDemoMode}
+            onToggleDemoMode={handleToggleDemoMode}
           />
         )}
 
@@ -1945,6 +2326,8 @@ export function App() {
             onOpenDeviceModal={() => setActiveModal("device")}
             onOpenLogVitals={() => setActiveModal("manual_vitals")}
             dataSource={dataSource}
+            isDemoMode={isDemoMode}
+            onToggleDemoMode={handleToggleDemoMode}
           />
         )}
 
@@ -2000,6 +2383,7 @@ export function App() {
               voiceTtsService.saveSettings(updated);
               showToast(`Master Voice output ${updated.masterVoiceEnabled ? "enabled" : "muted"}.`, "info");
             }}
+            onToast={showToast}
           />
         )}
 
@@ -2035,7 +2419,30 @@ export function App() {
                 showToast("Local data cache wiped.", "info");
               }
             }}
+            isDemoMode={isDemoMode}
+            onToggleDemoMode={handleToggleDemoMode}
           />
+        )}
+
+        {activeTab === "wearables" && (
+          <div className="p-4 md:p-6">
+            <WearablesView
+              bleStatus={bleStatus}
+              healthConnectStatus={healthConnectStatus}
+              healthConnectMetrics={healthConnectMetrics}
+              isScanningBle={isScanningBle}
+              isSyncingHealthConnect={isSyncingHealthConnect}
+              lastSyncTime={lastSyncTime}
+              onPairBluetooth={handlePairSmartwatch}
+              onSyncHealthConnect={handleHealthConnectSync}
+              onDisconnectBluetooth={handleDisconnectSmartwatch}
+              environment={environment}
+              health={health}
+              dataSource={dataSource}
+              isDemoMode={isDemoMode}
+              onToggleDemoMode={handleToggleDemoMode}
+            />
+          </div>
         )}
       </main>
 
@@ -2377,6 +2784,22 @@ export function App() {
                       >
                         Skip
                       </button>
+                      <button
+                        type="button"
+                        style={{
+                          background: "#fee2e2",
+                          color: "#dc2626",
+                          border: "1px solid #fecaca",
+                          borderRadius: "8px",
+                          padding: "6px 8px",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                        }}
+                        onClick={() => handleDeleteReminder(r.id)}
+                        title="Delete reminder"
+                      >
+                        🗑️
+                      </button>
                     </div>
                   </div>
                 ))
@@ -2572,103 +2995,34 @@ export function App() {
       {/* 5. SMARTWATCH & HEALTH CONNECT PAIRING MODAL */}
       {activeModal === "device" && (
         <div className="ls-modal-overlay" onClick={() => setActiveModal("none")}>
-          <div className="ls-modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="ls-modal-header">
-              <h3>Connect Wearables & Health Sources</h3>
+          <div
+            className="ls-modal-content"
+            style={{ maxWidth: "min(800px, 100%)", width: "100%", maxHeight: "90vh", overflowY: "auto", overflowX: "hidden", boxSizing: "border-box" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="ls-modal-header" style={{ marginBottom: "18px" }}>
+              <h3 style={{ margin: 0, fontSize: "18px", fontWeight: "bold" }}>Connect Wearables & Health Sources</h3>
               <button className="ls-close-btn" onClick={() => setActiveModal("none")}>
                 ✕
               </button>
             </div>
 
-            <div style={{ textAlign: "left", fontSize: "12px", color: "#4d4862" }}>
-              {/* Bluetooth GATT Card */}
-              <div
-                style={{
-                  background: bleStatus.isConnected ? "#e4f7ee" : "#f8f6fd",
-                  border: "1px solid #e7e3f4",
-                  borderRadius: "18px",
-                  padding: "16px",
-                  marginBottom: "14px",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <strong style={{ fontSize: "14px", color: "#302b48" }}>Bluetooth GATT Smartwatch</strong>
-                    <div style={{ fontSize: "11px", color: "#7770bd", marginTop: "3px" }}>
-                      {bleStatus.isConnected
-                        ? `Connected: ${bleStatus.deviceName || "Heart Rate Monitor"}`
-                        : "Supports standard GATT BLE: Polar, Garmin, Apple Watch BLE broadcast, and Pulse Oximeters"}
-                    </div>
-                  </div>
-                  <span className={`ls-badge ${bleStatus.isConnected ? "ls-badge-success" : "ls-badge-info"}`}>
-                    {bleStatus.isConnected ? "Connected" : "Disconnected"}
-                  </span>
-                </div>
-
-                <button
-                  className="ls-btn-primary"
-                  style={{ width: "100%", marginTop: "14px" }}
-                  onClick={handlePairSmartwatch}
-                  disabled={isScanningBle}
-                >
-                  {isScanningBle ? "Scanning for Bluetooth Smartwatch..." : bleStatus.isConnected ? "Reconnect Wearable" : "Pair Bluetooth Smartwatch"}
-                </button>
-              </div>
-
-              {/* Android Health Connect Card */}
-              <div
-                style={{
-                  background: "#f8f6fd",
-                  border: "1px solid #e7e3f4",
-                  borderRadius: "18px",
-                  padding: "16px",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <strong style={{ fontSize: "14px", color: "#302b48" }}>Android Health Connect</strong>
-                    <div style={{ fontSize: "11px", color: "#7770bd", marginTop: "3px" }}>
-                      Reads steps, heart rate, sleep & SpO2 committed by manufacturer apps (Samsung Health, Google Fit, Fitbit).
-                    </div>
-                  </div>
-                  <span className="ls-badge ls-badge-info">Native Bridge</span>
-                </div>
-
-                <div
-                  style={{
-                    background: "#ffffff",
-                    padding: "10px 12px",
-                    borderRadius: "12px",
-                    border: "1px solid #eae6f5",
-                    margin: "12px 0",
-                    fontSize: "11px",
-                    color: "#5f5979",
-                  }}
-                >
-                  Status: <strong>{healthConnectStatus}</strong>
-                </div>
-
-                <div style={{ display: "flex", gap: "10px" }}>
-                  <button
-                    className="ls-btn-primary"
-                    style={{ flex: 1 }}
-                    onClick={handleHealthConnectSync}
-                    disabled={isSyncingHealthConnect}
-                  >
-                    {isSyncingHealthConnect ? "Syncing Health Connect..." : "Sync Health Connect Readings"}
-                  </button>
-
-                  <button
-                    className="ls-btn-secondary"
-                    type="button"
-                    onClick={() => HealthConnectService.openSettings()}
-                    title="Open Health Connect app or settings"
-                  >
-                    ⚙️ Permissions
-                  </button>
-                </div>
-              </div>
-            </div>
+            <WearablesView
+              bleStatus={bleStatus}
+              healthConnectStatus={healthConnectStatus}
+              healthConnectMetrics={healthConnectMetrics}
+              isScanningBle={isScanningBle}
+              isSyncingHealthConnect={isSyncingHealthConnect}
+              lastSyncTime={lastSyncTime}
+              onPairBluetooth={handlePairSmartwatch}
+              onSyncHealthConnect={handleHealthConnectSync}
+              onDisconnectBluetooth={handleDisconnectSmartwatch}
+              environment={environment}
+              health={health}
+              dataSource={dataSource}
+              isDemoMode={isDemoMode}
+              onToggleDemoMode={handleToggleDemoMode}
+            />
           </div>
         </div>
       )}
@@ -3091,6 +3445,30 @@ export function App() {
                 {sosStatus.cancelled ? "⚠" : (sosStatus.recorded ? "✓" : "✗")} {sosStatus.message}
               </div>
 
+              {/* Telephony configuration reality indicator */}
+              {!sosStatus.telephonyLive && !sosStatus.cancelled && (
+                <div style={{
+                  background: "#fffbeb",
+                  border: "1px solid #fde68a",
+                  borderRadius: "14px",
+                  padding: "10px 14px",
+                  marginBottom: "14px",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "10px",
+                }}>
+                  <span style={{ fontSize: "18px", marginTop: "1px" }}>⚠️</span>
+                  <div>
+                    <strong style={{ color: "#92400e", display: "block", fontSize: "12px" }}>
+                      Demo SOS — messaging service is not configured.
+                    </strong>
+                    <span style={{ color: "#b45309", fontSize: "11px", lineHeight: "1.4", display: "block", marginTop: "2px" }}>
+                      Telephony provider credentials (Twilio) are not configured on the backend server. The SOS incident was logged in the database without dispatching real cellular SMS or voice calls.
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Status rows */}
               {[
                 {
@@ -3455,6 +3833,8 @@ function HomeScreen({
   onRegionChange,
   envLoading,
   envError,
+  isDemoMode,
+  onToggleDemoMode,
 }: {
   health: HealthData;
   environment: EnvironmentData;
@@ -3470,12 +3850,14 @@ function HomeScreen({
   onOpenLogVitals: () => void;
   onOpenEnvironment: () => void;
   onLogHydration: () => void;
-  dataSource: "real" | "demo" | "mixed";
+  dataSource: HealthDataSource;
   lastSyncTime: string | null;
   selectedRegion: string;
   onRegionChange: (region: string) => void;
   envLoading?: boolean;
   envError?: boolean;
+  isDemoMode?: boolean;
+  onToggleDemoMode?: (enabled: boolean) => void;
 }) {
   const nextMedicine = reminders.find((r) => r.reminder_type === "Medicine") || reminders[0];
 
@@ -3532,13 +3914,26 @@ function HomeScreen({
       {/* HEALTH RISK SCORE CARD */}
       <section className="health-score-card">
         <div className="score-content">
-          <div className="score-label">DYNAMIC CLINICAL RISK EVALUATION</div>
+          <div className="score-label">
+            {dataSource === "demo"
+              ? "DEMO RISK ASSESSMENT"
+              : dataSource === "not_connected"
+              ? "CLINICAL RISK EVALUATION — NO TELEMETRY"
+              : "DYNAMIC CLINICAL RISK EVALUATION"}
+          </div>
           <div className="score-title">
-            Status: {riskTier} Risk ({riskScore}/100)
+            {dataSource === "demo"
+              ? `Demo Assessment: ${riskTier} Risk (${riskScore}/100)`
+              : dataSource === "not_connected"
+              ? "Status: Telemetry Inactive"
+              : `Status: ${riskTier} Risk (${riskScore}/100)`}
           </div>
           <div className="score-description">
-            Transparent composite based on heart rate, SpO2, temperature, sleep, blood pressure, AQI, heat index, and flood risk.
-            {dataSource === "demo" ? " Based on simulated demo vitals." : " Safety indicator only — not a clinical diagnosis."}
+            {dataSource === "demo"
+              ? "Calculated from simulated demonstration vitals for presentation. Connect your watch or Health Connect to activate live clinical evaluation."
+              : dataSource === "not_connected"
+              ? "No live physiological telemetry or demo data active. Connect a wearable, sync Health Connect, or enable Demo Data mode to calculate clinical risk evaluation."
+              : "Transparent composite based on heart rate, SpO2, temperature, sleep, blood pressure, AQI, heat index, and flood risk. Safety indicator only — not a clinical diagnosis."}
           </div>
           {riskFactors.length > 0 && (
             <div style={{ marginTop: "10px", fontSize: "11px", color: "rgba(255,255,255,0.85)" }}>
@@ -3546,7 +3941,7 @@ function HomeScreen({
             </div>
           )}
 
-          <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
+          <div style={{ display: "flex", gap: "10px", marginTop: "16px", flexWrap: "wrap" }}>
             <button className="soft-button" type="button" onClick={() => onNavigate("health")}>
               View health telemetry <span>→</span>
             </button>
@@ -3563,7 +3958,7 @@ function HomeScreen({
 
         <div className="score-ring">
           <div className="score-ring-inner">
-            <strong>{riskScore}</strong>
+            <strong>{dataSource === "not_connected" ? "—" : riskScore}</strong>
             <span>Risk Score</span>
           </div>
         </div>
@@ -3574,7 +3969,7 @@ function HomeScreen({
         <div>
           <span>LIVE TELEMETRY</span>
           <h2>Today's overview</h2>
-          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px" }}>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
             <span
               style={{
                 display: "inline-flex",
@@ -3584,9 +3979,25 @@ function HomeScreen({
                 borderRadius: "12px",
                 fontSize: "10px",
                 fontWeight: 700,
-                background: dataSource === "real" ? "#ecfdf5" : dataSource === "demo" ? "#fffbeb" : "#f1f5f9",
-                color: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#64748b",
-                border: `1px solid ${dataSource === "real" ? "#bbf7d0" : dataSource === "demo" ? "#fde68a" : "#e2e8f0"}`,
+                background:
+                  dataSource === "real"
+                    ? "#ecfdf5"
+                    : dataSource === "demo"
+                    ? "#f5f3ff"
+                    : "#f1f5f9",
+                color:
+                  dataSource === "real"
+                    ? "#16a34a"
+                    : dataSource === "demo"
+                    ? "#7c3aed"
+                    : "#64748b",
+                border: `1px solid ${
+                  dataSource === "real"
+                    ? "#bbf7d0"
+                    : dataSource === "demo"
+                    ? "#ddd6fe"
+                    : "#e2e8f0"
+                }`,
               }}
             >
               <span
@@ -3594,10 +4005,30 @@ function HomeScreen({
                   width: "6px",
                   height: "6px",
                   borderRadius: "50%",
-                  background: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#94a3b8",
+                  background:
+                    dataSource === "real"
+                      ? "#16a34a"
+                      : dataSource === "demo"
+                      ? "#7c3aed"
+                      : "#94a3b8",
                 }}
               />
-              {dataSource === "real" ? "LIVE DATA" : dataSource === "demo" ? "DEMO DATA" : "NO DATA"}
+              {dataSource === "real"
+                ? "● LIVE DATA"
+                : dataSource === "demo"
+                ? "🟣 DEMO DATA"
+                : dataSource === "unavailable"
+                ? "— WAITING FOR RECORDS"
+                : "⚪ NOT CONNECTED"}
+            </span>
+            <span style={{ fontSize: "11px", color: "#64748b" }}>
+              {dataSource === "real"
+                ? `Source: ${health.source || "Health Connect"}`
+                : dataSource === "demo"
+                ? "Simulated values for presentation"
+                : dataSource === "unavailable"
+                ? "Source: Connected — awaiting reading"
+                : "No device connected • Demo mode OFF"}
             </span>
             {lastSyncTime && (
               <span style={{ fontSize: "10px", color: "#94a3b8" }}>
@@ -3611,13 +4042,165 @@ function HomeScreen({
         </button>
       </section>
 
+      {/* DEMO NOTICE CALLOUT */}
+      {dataSource === "demo" && (
+        <div style={{
+          background: "#f5f3ff",
+          border: "1px solid #ddd6fe",
+          borderRadius: "14px",
+          padding: "12px 16px",
+          margin: "12px 0 16px 0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+            <span style={{ fontSize: "20px", flexShrink: 0 }}>🟣</span>
+            <div style={{ minWidth: 0 }}>
+              <strong style={{ fontSize: "13px", color: "#5b21b6" }}>DEMO DATA MODE ACTIVE</strong>
+              <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#6d28d9" }}>
+                Simulating realistic vitals for presentation. Values are not real medical records.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+            {onToggleDemoMode && (
+              <button
+                type="button"
+                onClick={() => onToggleDemoMode(false)}
+                style={{
+                  background: "#ffffff",
+                  color: "#6d28d9",
+                  border: "1px solid #c4b5fd",
+                  borderRadius: "8px",
+                  padding: "6px 12px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Turn Off Demo
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onNavigate("health")}
+              style={{
+                background: "#7c3aed",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "8px",
+                padding: "6px 12px",
+                fontSize: "11px",
+                fontWeight: 700,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Manage Sources
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* NOT CONNECTED NOTICE CALLOUT */}
+      {dataSource === "not_connected" && (
+        <div style={{
+          background: "#f8fafc",
+          border: "1px solid #e2e8f0",
+          borderRadius: "14px",
+          padding: "12px 16px",
+          margin: "12px 0 16px 0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+            <span style={{ fontSize: "20px", flexShrink: 0 }}>⚪</span>
+            <div style={{ minWidth: 0 }}>
+              <strong style={{ fontSize: "13px", color: "#334155" }}>NO WEARABLE CONNECTED</strong>
+              <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#64748b" }}>
+                Demo mode is OFF. Enable Demo Mode for presentation or pair a wearable.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+            {onToggleDemoMode && (
+              <button
+                type="button"
+                onClick={() => onToggleDemoMode(true)}
+                style={{
+                  background: "#7c3aed",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "6px 12px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Enable Demo Mode
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onNavigate("wearables")}
+              style={{
+                background: "#ffffff",
+                color: "#475569",
+                border: "1px solid #cbd5e1",
+                borderRadius: "8px",
+                padding: "6px 12px",
+                fontSize: "11px",
+                fontWeight: 600,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Pair Device
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* UNAVAILABLE NOTICE CALLOUT */}
+      {dataSource === "unavailable" && (
+        <div style={{
+          background: "#f8fafc",
+          border: "1px solid #e2e8f0",
+          borderRadius: "14px",
+          padding: "12px 16px",
+          margin: "12px 0 16px 0",
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
+        }}>
+          <span style={{ fontSize: "20px" }}>ℹ️</span>
+          <div>
+            <strong style={{ fontSize: "13px", color: "#334155" }}>NO LIVE DATA AVAILABLE</strong>
+            <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#64748b" }}>
+              Your health source is connected, but no recent reading is available.
+            </p>
+          </div>
+        </div>
+      )}
+
       <section className="health-mini-grid">
         <div onClick={() => onNavigate("health")} style={{ cursor: "pointer" }}>
           <MiniHealthCard
             icon="♥"
             title="Heart Rate"
             value={display(health.heart_rate)}
-            unit={available(health.heart_rate) ? (dataSource === "demo" ? "BPM (Demo)" : "BPM") : "Unavailable"}
+            unit={available(health.heart_rate) ? "BPM" : "Unavailable"}
+            isLive={Boolean(dataSource === "real" && available(health.heart_rate))}
+            isDemo={Boolean(dataSource === "demo")}
             variant="peach"
           />
         </div>
@@ -3626,7 +4209,9 @@ function HomeScreen({
             icon="◉"
             title="Blood Oxygen"
             value={display(health.spo2)}
-            unit={available(health.spo2) ? (dataSource === "demo" ? "% (Demo)" : "%") : "Unavailable"}
+            unit={available(health.spo2) ? "%" : "Unavailable"}
+            isLive={Boolean(dataSource === "real" && available(health.spo2))}
+            isDemo={Boolean(dataSource === "demo")}
             variant="lavender"
           />
         </div>
@@ -3635,7 +4220,9 @@ function HomeScreen({
             icon="⌁"
             title="Steps"
             value={display(health.steps)}
-            unit={available(health.steps) ? (dataSource === "demo" ? "steps (Demo)" : "steps") : "Unavailable"}
+            unit={available(health.steps) ? "steps" : "Unavailable"}
+            isLive={Boolean(dataSource === "real" && available(health.steps))}
+            isDemo={Boolean(dataSource === "demo")}
             variant="cream"
           />
         </div>
@@ -3644,7 +4231,9 @@ function HomeScreen({
             icon="◔"
             title="Sleep"
             value={display(health.sleep)}
-            unit={available(health.sleep) ? (health.source?.includes("Demo") ? "hours (Demo)" : "hours") : "Unavailable"}
+            unit={available(health.sleep) ? "hours" : "Unavailable"}
+            isLive={Boolean(dataSource === "real" && available(health.sleep))}
+            isDemo={Boolean(dataSource === "demo")}
             variant="pink"
           />
         </div>
@@ -3722,9 +4311,30 @@ function HomeScreen({
             📍 {currentLocation.label}
             <span className="env-metrics-chevron">▾</span>
           </button>
-          <span className="env-metrics-fresh">
-            {envLoading ? "Updating environment..." : envError ? "Live data unavailable" : "Live Open-Meteo feed"}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "10px",
+                fontWeight: 700,
+                background: envError ? "#fef2f2" : "#ecfdf5",
+                color: envError ? "#dc2626" : "#16a34a",
+                border: `1px solid ${envError ? "#fecaca" : "#bbf7d0"}`,
+              }}
+            >
+              <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: envError ? "#dc2626" : "#16a34a" }} />
+              {envLoading ? "UPDATING ENVIRONMENT..." : envError ? "Environmental data temporarily unavailable" : "● LIVE ENVIRONMENT"}
+            </span>
+            {!envError && !envLoading && (
+              <span style={{ fontSize: "10px", color: "#64748b" }}>
+                Source: Live environmental data
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Metric grid */}
@@ -3875,6 +4485,8 @@ function HealthScreen({
   onOpenDeviceModal,
   onOpenLogVitals,
   dataSource,
+  isDemoMode,
+  onToggleDemoMode,
 }: {
   health: HealthData;
   trends: any[];
@@ -3887,7 +4499,9 @@ function HealthScreen({
   onRefresh: () => void;
   onOpenDeviceModal: () => void;
   onOpenLogVitals: () => void;
-  dataSource: "real" | "demo" | "mixed";
+  dataSource: HealthDataSource;
+  isDemoMode?: boolean;
+  onToggleDemoMode?: (enabled: boolean) => void;
 }) {
   return (
     <>
@@ -3897,17 +4511,91 @@ function HealthScreen({
         description="Verified health metrics from Bluetooth GATT wearables, Health Connect, and manual logs."
       />
 
-      {/* CONNECT CARD */}
+      {/* DATA SOURCE MODE SELECTOR */}
+      {onToggleDemoMode && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            background: "#ffffff",
+            border: "1px solid #e2e8f0",
+            borderRadius: "16px",
+            padding: "10px 16px",
+            marginBottom: "14px",
+            flexWrap: "wrap",
+            gap: "10px",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.03)",
+            boxSizing: "border-box",
+            width: "100%",
+            maxWidth: "100%",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "11px", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Data Source Mode
+            </div>
+            <div style={{ fontSize: "13px", fontWeight: 700, color: "#1e293b" }}>
+              {isDemoMode ? "🧪 Presentation Demo Mode" : "⌚ Real Hardware / Health Connect"}
+            </div>
+          </div>
+
+          <div style={{ display: "inline-flex", background: "#f1f5f9", padding: "3px", borderRadius: "10px", gap: "3px" }}>
+            <button
+              type="button"
+              onClick={() => onToggleDemoMode(false)}
+              style={{
+                padding: "6px 14px",
+                borderRadius: "8px",
+                border: "none",
+                fontSize: "11px",
+                fontWeight: 700,
+                cursor: "pointer",
+                background: !isDemoMode ? "#ffffff" : "transparent",
+                color: !isDemoMode ? "#1e293b" : "#64748b",
+                boxShadow: !isDemoMode ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+                transition: "all 0.15s ease",
+              }}
+            >
+              Real Device
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleDemoMode(true)}
+              style={{
+                padding: "6px 14px",
+                borderRadius: "8px",
+                border: "none",
+                fontSize: "11px",
+                fontWeight: 700,
+                cursor: "pointer",
+                background: isDemoMode ? "#7c3aed" : "transparent",
+                color: isDemoMode ? "#ffffff" : "#64748b",
+                boxShadow: isDemoMode ? "0 1px 3px rgba(124, 58, 237, 0.25)" : "none",
+                transition: "all 0.15s ease",
+              }}
+            >
+              Demo Data
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 1. HEALTH SOURCES CARD (ALWAYS SEPARATE FROM DEMO READINGS) */}
       <section className="connect-card">
-        <div className="connect-symbol">⌚</div>
-        <div style={{ flex: 1 }}>
-          <span>HARDWARE SENSORS</span>
-          <strong>
+        <div className="connect-symbol">
+          {bleStatus.isConnected ? "⌚" : "❤️"}
+        </div>
+        <div style={{ flex: "1 1 0%", minWidth: 0 }}>
+          <span>HEALTH SOURCES</span>
+          <strong style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
             {bleStatus.isConnected
               ? `Connected: ${bleStatus.deviceName || "Smartwatch"}`
-              : "Connect a verified health source"}
+              : dataSource === "real"
+              ? formatHumanSourceLabel(health.source) || "Health Connect"
+              : "Health Connect"}
           </strong>
-          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", flexWrap: "wrap", minWidth: 0 }}>
             <span
               style={{
                 display: "inline-flex",
@@ -3917,9 +4605,26 @@ function HealthScreen({
                 borderRadius: "12px",
                 fontSize: "10px",
                 fontWeight: 700,
-                background: dataSource === "real" ? "#ecfdf5" : dataSource === "demo" ? "#fffbeb" : "#f1f5f9",
-                color: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#64748b",
-                border: `1px solid ${dataSource === "real" ? "#bbf7d0" : dataSource === "demo" ? "#fde68a" : "#e2e8f0"}`,
+                background:
+                  dataSource === "real"
+                    ? "#ecfdf5"
+                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    ? "#fffbeb"
+                    : "#f1f5f9",
+                color:
+                  dataSource === "real"
+                    ? "#16a34a"
+                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    ? "#d97706"
+                    : "#64748b",
+                border: `1px solid ${
+                  dataSource === "real"
+                    ? "#bbf7d0"
+                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    ? "#fde68a"
+                    : "#e2e8f0"
+                }`,
+                flexShrink: 0,
               }}
             >
               <span
@@ -3927,41 +4632,160 @@ function HealthScreen({
                   width: "6px",
                   height: "6px",
                   borderRadius: "50%",
-                  background: dataSource === "real" ? "#16a34a" : dataSource === "demo" ? "#d97706" : "#94a3b8",
+                  background:
+                    dataSource === "real"
+                      ? "#16a34a"
+                      : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                      ? "#d97706"
+                      : "#94a3b8",
                 }}
               />
-              {dataSource === "real" ? "LIVE DATA" : dataSource === "demo" ? "DEMO DATA" : "NO DATA"}
+              {dataSource === "real"
+                ? "Connected — Real Data"
+                : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                ? "Connected — No Data"
+                : "Not Connected"}
             </span>
-            {lastSyncTime && (
-              <span style={{ fontSize: "10px", color: "#94a3b8" }}>
+            {dataSource === "real" && lastSyncTime && (
+              <span style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap" }}>
                 Last synced: {lastSyncTime}
               </span>
             )}
           </div>
-          <p>
-            {lastSyncTime
-              ? `Source: ${health.source || "Wearable"}`
-              : "LifeShield only displays honest verified data. No fabricated values."}
+          <p style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+            {dataSource === "real"
+              ? `Verified telemetry active via ${formatHumanSourceLabel(health.source)}.`
+              : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+              ? "Health source is connected, but no recent health records are available yet."
+              : "No physical wearable or Health Connect records connected."}
           </p>
-          {dataSource === "demo" && (
-            <div style={{ fontSize: "10px", color: "#e67e22", marginTop: "3px", fontWeight: 700 }}>
-              Demo Mode: Values shown are simulated for web demonstration. Connect a real device for actual readings.
-            </div>
-          )}
-          <div style={{ fontSize: "10px", color: "#7770bd", marginTop: "3px" }}>
-            Health Connect Bridge: {healthConnectStatus}
-          </div>
         </div>
 
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
           <button type="button" onClick={onOpenDeviceModal}>
-            {bleStatus.isConnected ? "Manage Wearable" : "Pair Device"}
+            {bleStatus.isConnected ? "Manage Wearable" : "Connect Source"}
           </button>
         </div>
       </section>
 
+      {/* 2. DEMO HEALTH READINGS CARD (SEPARATE, AS SPECIFIED IN REQUIREMENT 5) */}
+      {dataSource === "demo" && (
+        <section
+          style={{
+            background: "linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)",
+            border: "1px solid #ddd6fe",
+            borderRadius: "20px",
+            padding: "16px 20px",
+            marginTop: "14px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "12px",
+            boxShadow: "0 2px 10px rgba(124, 58, 237, 0.06)",
+            boxSizing: "border-box",
+            width: "100%",
+            maxWidth: "100%",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "20px" }}>🧪</span>
+              <div>
+                <strong style={{ fontSize: "14px", color: "#4c1d95" }}>Demo Health Readings</strong>
+                <div style={{ fontSize: "11px", color: "#6d28d9" }}>Simulated for SIH Presentation & UI Demo</div>
+              </div>
+            </div>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+                padding: "3px 10px",
+                borderRadius: "20px",
+                fontSize: "11px",
+                fontWeight: 800,
+                background: "#7c3aed",
+                color: "#ffffff",
+                letterSpacing: "0.04em",
+              }}
+            >
+              ● DEMO DATA
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(min(90px, 100%), 1fr))",
+              gap: "8px",
+              marginTop: "4px",
+            }}
+          >
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>❤️ Heart Rate</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.heart_rate ?? 72} BPM</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>🫁 SpO₂</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.spo2 ?? 98}%</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>👟 Steps</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{(health.steps ?? 4820).toLocaleString()}</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>💧 Hydration</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.hydration ?? 62}%</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>😴 Sleep</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>7h 24m</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>🌡️ Temp</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.temperature ?? 36.7} °C</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>🔥 Calories</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{(health.calories ?? 1420).toLocaleString()} kcal</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>🫁 Resp Rate</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.respiratory_rate ?? 16} /min</div>
+            </div>
+            <div style={{ background: "#ffffff", padding: "10px 12px", borderRadius: "12px", border: "1px solid #e9d5ff" }}>
+              <div style={{ fontSize: "11px", color: "#7e22ce" }}>⚡ Activity</div>
+              <div style={{ fontSize: "15px", fontWeight: 800, color: "#1e1b4b" }}>{health.activity || "Moderate"}</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginTop: "4px" }}>
+            <span style={{ fontSize: "10px", color: "#6d28d9" }}>
+              Values breathe gently in real time • Not real medical data
+            </span>
+            {onToggleDemoMode && (
+              <button
+                type="button"
+                onClick={() => onToggleDemoMode(false)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #c4b5fd",
+                  borderRadius: "8px",
+                  padding: "4px 10px",
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  color: "#6d28d9",
+                  cursor: "pointer",
+                }}
+              >
+                Turn Off Demo
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* REFRESH & LOG ACTIONS */}
-      <div style={{ display: "flex", gap: "10px", margin: "18px 0" }}>
+      <div style={{ display: "flex", gap: "10px", margin: "16px 0", flexWrap: "wrap", minWidth: 0 }}>
         <button className="soft-button" type="button" onClick={onRefresh} disabled={isRefreshing}>
           {isRefreshing ? "Refreshing..." : "Refresh health data"} <span>↻</span>
         </button>
@@ -3976,29 +4800,66 @@ function HealthScreen({
           title="Heart Rate"
           icon="♥"
           value={display(health.heart_rate)}
-          unit={available(health.heart_rate) ? (dataSource === "demo" ? "BPM (Demo)" : "BPM") : "Not available from connected device"}
+          unit={available(health.heart_rate) ? "BPM" : "Unavailable"}
+          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
+          source={available(health.heart_rate) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
+          isLive={Boolean(dataSource === "real" && available(health.heart_rate))}
+          isDemo={Boolean(dataSource === "demo")}
+          updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
+          onCheckHealthConnect={onOpenDeviceModal}
           variant="peach"
         />
         <DetailedHealthCard
           title="Blood Oxygen"
           icon="◉"
           value={display(health.spo2)}
-          unit={available(health.spo2) ? (dataSource === "demo" ? "% (Demo)" : "%") : "Not available from connected device"}
+          unit={available(health.spo2) ? "%" : "Unavailable"}
+          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
+          source={available(health.spo2) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
+          isLive={Boolean(dataSource === "real" && available(health.spo2))}
+          isDemo={Boolean(dataSource === "demo")}
+          updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
+          onCheckHealthConnect={onOpenDeviceModal}
           variant="lavender"
         />
         <DetailedHealthCard
-          title="Skin/Body Temp"
-          icon="♨"
-          value={display(health.temperature)}
-          unit={available(health.temperature) ? (dataSource === "demo" ? "°C (Demo)" : "°C") : "Not available from connected device"}
-          variant="cream"
-        />
-        <DetailedHealthCard
-          title="Steps Accumulator"
+          title="Steps"
           icon="⌁"
           value={display(health.steps)}
-          unit={available(health.steps) ? (dataSource === "demo" ? "steps (Demo)" : "steps") : "Not available from connected device"}
+          unit={available(health.steps) ? "steps" : "Unavailable"}
+          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
+          source={available(health.steps) ? formatHumanSourceLabel(health.source) : undefined}
+          isLive={Boolean(dataSource === "real" && available(health.steps))}
+          isDemo={Boolean(dataSource === "demo")}
+          updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
+          onCheckHealthConnect={onOpenDeviceModal}
           variant="blue"
+        />
+        <DetailedHealthCard
+          title="Sleep Session"
+          icon="◔"
+          value={display(health.sleep)}
+          unit={available(health.sleep) ? "hours" : "Unavailable"}
+          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
+          source={available(health.sleep) ? formatHumanSourceLabel(health.source) : undefined}
+          isLive={Boolean(dataSource === "real" && available(health.sleep))}
+          isDemo={Boolean(dataSource === "demo")}
+          updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
+          onCheckHealthConnect={onOpenDeviceModal}
+          variant="pink"
+        />
+        <DetailedHealthCard
+          title="Body Temperature"
+          icon="♨"
+          value={display(health.temperature)}
+          unit={available(health.temperature) ? "°C" : "Unavailable"}
+          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
+          source={available(health.temperature) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
+          isLive={Boolean(dataSource === "real" && available(health.temperature))}
+          isDemo={Boolean(dataSource === "demo")}
+          updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
+          onCheckHealthConnect={onOpenDeviceModal}
+          variant="cream"
         />
       </section>
 
@@ -4010,19 +4871,22 @@ function HealthScreen({
         </div>
 
         <div className="ls-trend-bar-wrapper">
-          {(trends.length > 0
-            ? trends
-            : [{ heart_rate: 68 }, { heart_rate: 74 }, { heart_rate: 72 }, { heart_rate: 76 }, { heart_rate: 71 }]
-          ).map((t, idx) => (
-            <div key={idx} className="ls-trend-bar-col">
-              <div
-                className="ls-trend-bar-inner"
-                style={{ height: `${Math.min(100, Math.max(15, (t.heart_rate || 70) - 30))}%` }}
-                title={`${t.heart_rate || 70} BPM`}
-              />
-              <span style={{ fontSize: "9px", color: "#958fb4" }}>{t.heart_rate || 70}</span>
+          {trends.length > 0 ? (
+            trends.map((t, idx) => (
+              <div key={idx} className="ls-trend-bar-col">
+                <div
+                  className="ls-trend-bar-inner"
+                  style={{ height: `${Math.min(100, Math.max(15, (t.heart_rate || 70) - 30))}%` }}
+                  title={`${t.heart_rate || 70} BPM`}
+                />
+                <span style={{ fontSize: "9px", color: "#958fb4" }}>{t.heart_rate || 70}</span>
+              </div>
+            ))
+          ) : (
+            <div style={{ padding: "16px", color: "#94a3b8", fontSize: "12px", textAlign: "center", width: "100%" }}>
+              No historical trend records logged yet. Synchronize your wearable or Health Connect to view real baseline trends.
             </div>
-          ))}
+          )}
         </div>
       </section>
 
@@ -4220,6 +5084,7 @@ function AIScreen({
   voiceSettings,
   onSendMessage,
   onToggleVoice,
+  onToast,
 }: {
   messages: ChatMessage[];
   input: string;
@@ -4228,7 +5093,62 @@ function AIScreen({
   voiceSettings: VoiceSettings;
   onSendMessage: (text?: string) => void;
   onToggleVoice: () => void;
+  onToast?: (message: string, type?: "info" | "success" | "warning") => void;
 }) {
+  const [isListening, setIsListening] = useState(false);
+
+  const startVoiceInput = () => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      if (onToast) {
+        onToast("Voice input is not supported in this browser. Please use Chrome or Edge.", "warning");
+      }
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = voiceSettings.language === "te" ? "te-IN" : voiceSettings.language === "hi" ? "hi-IN" : "en-IN";
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+        if (transcript) {
+          setInput(transcript);
+          onSendMessage(transcript);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn("[LifeShield Voice] Speech recognition error:", event.error);
+        setIsListening(false);
+        if (event.error === "not-allowed") {
+          if (onToast) onToast("Microphone access was denied. Please allow microphone permissions in browser settings.", "warning");
+        } else if (event.error !== "no-speech") {
+          if (onToast) onToast("Speech recognition note: " + event.error, "warning");
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognition.start();
+    } catch (e: any) {
+      console.warn("[LifeShield Voice] Could not start speech recognition:", e);
+      setIsListening(false);
+      if (onToast) onToast("Could not start speech recognition: " + (e.message || String(e)), "warning");
+    }
+  };
+
   return (
     <>
       <PageHeading
@@ -4297,15 +5217,42 @@ function AIScreen({
 
         {/* INPUT */}
         <div className="ai-input">
+          <button
+            type="button"
+            onClick={startVoiceInput}
+            style={{
+              background: isListening ? "#ef4444" : "#f1f5f9",
+              color: isListening ? "#ffffff" : "#64748b",
+              border: "none",
+              borderRadius: "10px",
+              width: "36px",
+              height: "36px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "16px",
+              marginRight: "6px",
+              transition: "all 0.2s ease",
+              flexShrink: 0,
+            }}
+            title={isListening ? "Listening... speak now" : "Voice input"}
+            aria-label="Voice input"
+          >
+            {isListening ? "🎙️" : "🎤"}
+          </button>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") onSendMessage();
+              if (e.key === "Enter" && !isLoading) {
+                e.preventDefault();
+                onSendMessage();
+              }
             }}
-            placeholder="Ask LifeShield clinical assistant..."
+            placeholder={isListening ? "Listening... speak your question now" : "Ask LifeShield clinical assistant..."}
           />
-          <button type="button" onClick={() => onSendMessage()} disabled={isLoading} aria-label="Send message">
+          <button type="button" onClick={() => !isLoading && onSendMessage()} disabled={isLoading} aria-label="Send message">
             ↑
           </button>
         </div>
@@ -4334,6 +5281,8 @@ function ProfileScreen({
   onLogout,
   onExportRecords,
   onClearCache,
+  isDemoMode,
+  onToggleDemoMode,
 }: {
   user: UserAccount | null;
   baselineRestingHr: number;
@@ -4351,6 +5300,8 @@ function ProfileScreen({
   onLogout: () => void;
   onExportRecords: () => void;
   onClearCache: () => void;
+  isDemoMode?: boolean;
+  onToggleDemoMode?: (enabled: boolean) => void;
 }) {
   return (
     <>
@@ -4425,6 +5376,19 @@ function ProfileScreen({
 
       {/* SETTINGS MENU */}
       <section className="settings-container">
+        {onToggleDemoMode && (
+          <Setting
+            icon="🧪"
+            title="Presentation Demo Data Mode"
+            description={
+              isDemoMode
+                ? "Active: Simulating clinical vitals for SIH evaluation"
+                : "Disabled: Real wearable telemetry required"
+            }
+            badge={isDemoMode ? "DEMO ON" : "OFF"}
+            onClick={() => onToggleDemoMode(!isDemoMode)}
+          />
+        )}
         <Setting icon="🔒" title="Native Android permissions" description="Location, body sensors, and Health Connect" onClick={onOpenPermissions} />
         <Setting icon="⌚" title="Connected smartwatches" description="Web Bluetooth GATT and Health Connect" onClick={onOpenDeviceModal} />
         <Setting icon="⏰" title="Medicine & wellness reminders" description="Manage reminders and dosage audit trail" onClick={onOpenReminders} />
@@ -4465,19 +5429,41 @@ function MiniHealthCard({
   value,
   unit,
   variant,
+  isLive,
+  isDemo,
 }: {
   icon: string;
   title: string;
   value: string;
   unit: string;
   variant: string;
+  isLive?: boolean;
+  isDemo?: boolean;
 }) {
+  const isUnavailable = value === "—" || value === "Unavailable" || !value;
+
   return (
     <div className={`mini-health-card ${variant}`}>
       <div className="mini-icon">{icon}</div>
       <span className="mini-title">{title}</span>
-      <strong>{value}</strong>
-      <small>{unit}</small>
+      <strong style={{ fontSize: isUnavailable ? "18px" : undefined, color: isUnavailable ? "#94a3b8" : undefined }}>
+        {isUnavailable ? "Unavailable" : value}
+      </strong>
+      <small style={{ color: isUnavailable ? "#94a3b8" : undefined }}>
+        {isUnavailable ? "No record found" : unit}
+      </small>
+      {isLive && !isUnavailable && (
+        <div style={{ fontSize: "9px", color: "#10b981", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px", marginTop: "3px" }}>
+          <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#10b981" }} />
+          LIVE DATA
+        </div>
+      )}
+      {isDemo && !isUnavailable && (
+        <div style={{ fontSize: "9px", color: "#d97706", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px", marginTop: "3px" }}>
+          <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#d97706" }} />
+          DEMO DATA
+        </div>
+      )}
     </div>
   );
 }
@@ -4488,19 +5474,80 @@ function DetailedHealthCard({
   value,
   unit,
   variant,
+  source,
+  isLive,
+  isDemo,
+  updatedAgo,
+  reasonUnavailable,
+  onCheckHealthConnect,
 }: {
   title: string;
   icon: string;
   value: string;
   unit: string;
   variant: string;
+  source?: string;
+  isLive?: boolean;
+  isDemo?: boolean;
+  updatedAgo?: string;
+  reasonUnavailable?: string;
+  onCheckHealthConnect?: () => void;
 }) {
+  const isUnavailable = value === "—" || value === "Unavailable" || !value;
+
   return (
     <div className={`detail-card ${variant}`}>
       <div className="detail-icon">{icon}</div>
       <span>{title}</span>
-      <strong>{value}</strong>
-      <small>{unit}</small>
+      <strong style={{ fontSize: isUnavailable ? "20px" : undefined, color: isUnavailable ? "#94a3b8" : undefined }}>
+        {isUnavailable ? "Unavailable" : value}
+      </strong>
+      <small style={{ color: isUnavailable ? "#94a3b8" : undefined }}>
+        {isUnavailable ? (reasonUnavailable || "No record found in Health Connect") : unit}
+      </small>
+
+      {isUnavailable && onCheckHealthConnect && (
+        <button
+          type="button"
+          onClick={onCheckHealthConnect}
+          style={{
+            marginTop: "10px",
+            padding: "6px 12px",
+            fontSize: "11px",
+            fontWeight: 600,
+            borderRadius: "10px",
+            background: "rgba(59, 130, 246, 0.12)",
+            color: "#38bdf8",
+            border: "1px solid rgba(56, 189, 248, 0.3)",
+            cursor: "pointer",
+            width: "100%",
+            transition: "all 0.2s ease",
+          }}
+        >
+          Check Health Connect
+        </button>
+      )}
+
+      {!isUnavailable && (
+        <div style={{ marginTop: "8px", paddingTop: "6px", borderTop: "1px solid rgba(148, 163, 184, 0.15)", fontSize: "10px", textAlign: "left" }}>
+          <div style={{ color: "#94a3b8", overflowWrap: "anywhere", wordBreak: "break-word" }}>Source: {formatHumanSourceLabel(source) || (isDemo ? "Simulated Demo" : "Health Source")}</div>
+          {isLive ? (
+            <div style={{ color: "#10b981", fontWeight: "bold", display: "flex", alignItems: "center", gap: "4px", marginTop: "2px" }}>
+              <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10b981" }} />
+              LIVE DATA • {updatedAgo || "active"}
+            </div>
+          ) : isDemo ? (
+            <div style={{ color: "#d97706", fontWeight: "bold", display: "flex", alignItems: "center", gap: "4px", marginTop: "2px" }}>
+              <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#d97706" }} />
+              DEMO DATA • Connect device for live
+            </div>
+          ) : (
+            <div style={{ color: "#64748b", marginTop: "2px" }}>
+              {updatedAgo ? `Updated ${updatedAgo}` : "Record verified"}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4532,18 +5579,36 @@ function Setting({
   icon,
   title,
   description,
+  badge,
   onClick,
 }: {
   icon: string;
   title: string;
   description: string;
+  badge?: string;
   onClick?: () => void;
 }) {
   return (
     <button className="setting" type="button" onClick={onClick}>
       <div className="setting-icon">{icon}</div>
-      <div>
-        <strong>{title}</strong>
+      <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+          <strong>{title}</strong>
+          {badge && (
+            <span
+              style={{
+                fontSize: "10px",
+                fontWeight: 800,
+                padding: "2px 8px",
+                borderRadius: "10px",
+                background: badge.includes("ON") ? "#7c3aed" : "#f1f5f9",
+                color: badge.includes("ON") ? "#ffffff" : "#64748b",
+              }}
+            >
+              {badge}
+            </span>
+          )}
+        </div>
         <span>{description}</span>
       </div>
       <b>→</b>

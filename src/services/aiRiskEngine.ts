@@ -162,8 +162,8 @@ export class AIRiskEngine {
       return {
         isAnomaly: false,
         severity: 'SAFE',
-        reason: 'Heart rate telemetry is not available from a connected device.',
-        advice: ['Connect a Bluetooth Low Energy heart rate monitor or smartwatch in the Health tab.']
+        reason: 'Heart rate telemetry is not available from Health Connect or connected wearable.',
+        advice: ['Connect a Health Connect-compatible wearable companion app to synchronize live heart rate.']
       };
     }
 
@@ -288,7 +288,7 @@ export class AIRiskEngine {
         signals: [
           { label: 'Ambient Temp', value: `${env.ambientTempC}°C` },
           { label: 'Heat Index', value: `${Math.round(env.heatIndexC)}°C` },
-          { label: 'Heart Rate', value: `${vitals.heartRate} BPM`, baselineComparison: `Baseline: ${baseline.restingHeartRate} BPM` }
+          { label: 'Heart Rate', value: vitals.heartRate != null ? `${vitals.heartRate} BPM` : 'Unmeasured', baselineComparison: `Baseline: ${baseline.restingHeartRate} BPM` }
         ],
         detectedAt: new Date().toLocaleTimeString()
       });
@@ -307,7 +307,7 @@ export class AIRiskEngine {
         reason: respRes.reason,
         actionableGuidance: respRes.advice,
         signals: [
-          { label: 'SpO2 Level', value: `${vitals.spO2}%`, baselineComparison: `Min Normal: ${baseline.normalSpO2Min}%` },
+          { label: 'SpO2 Level', value: vitals.spO2 != null ? `${vitals.spO2}%` : 'Unmeasured', baselineComparison: `Min Normal: ${baseline.normalSpO2Min}%` },
           { label: 'Air Quality (AQI)', value: `${env.aqi} (${env.pollutionCategory})` }
         ],
         detectedAt: new Date().toLocaleTimeString()
