@@ -109,6 +109,67 @@ def test_health_vitals(auth_headers):
     print("  -> Passed Health vitals telemetry and trend aggregation")
 
 
+def test_hydration_endpoints(auth_headers):
+    print("\n[TEST 3B] Testing Hydration Logging & Summaries ...")
+    # Single entry
+    post_res = client.post("/api/health/hydration", json={
+        "amount_ml": 250,
+        "source": "manual"
+    }, headers=auth_headers)
+    assert post_res.status_code == 200
+    res_data = post_res.json()
+    assert res_data["amount_ml"] == 250
+    assert res_data["sync_status"] == "synced"
+
+    # Batch entry
+    batch_res = client.post("/api/health/hydration/batch", json={
+        "readings": [
+            {"amount_ml": 250, "source": "manual"},
+            {"amount_ml": 500, "source": "manual"}
+        ]
+    }, headers=auth_headers)
+    assert batch_res.status_code == 200
+    assert len(batch_res.json()) == 2
+
+    # Hydration Summary
+    sum_res = client.get("/api/health/hydration", headers=auth_headers)
+    assert sum_res.status_code == 200
+    summary = sum_res.json()
+    assert summary["goal_ml"] == 2000
+    assert summary["today_total_ml"] >= 1000
+    assert summary["remaining_ml"] <= 1000
+    assert summary["percentage"] >= 50
+
+    # Idempotency test: Re-submitting same ID must NOT duplicate
+    fixed_id = "test-idempotent-event-123"
+    r1 = client.post("/api/health/hydration", json={
+        "id": fixed_id,
+        "amount_ml": 250,
+        "source": "manual"
+    }, headers=auth_headers)
+    assert r1.status_code == 200
+    assert r1.json()["id"] == fixed_id
+
+    # Second submit with same ID
+    r2 = client.post("/api/health/hydration", json={
+        "id": fixed_id,
+        "amount_ml": 250,
+        "source": "manual"
+    }, headers=auth_headers)
+    assert r2.status_code == 200
+    assert r2.json()["id"] == fixed_id
+
+    # Batch retry with same ID
+    r3 = client.post("/api/health/hydration/batch", json={
+        "readings": [{"id": fixed_id, "amount_ml": 250, "source": "manual"}]
+    }, headers=auth_headers)
+    assert r3.status_code == 200
+    assert len(r3.json()) == 1
+    assert r3.json()[0]["id"] == fixed_id
+
+    print("  -> Passed Hydration logging, batch syncing, daily total calculations, and retry idempotency")
+
+
 def test_reminders_and_logs(auth_headers):
     print("\n[TEST 4] Testing Reminders & Routine Taken/Skipped Logs ...")
     # Create reminder

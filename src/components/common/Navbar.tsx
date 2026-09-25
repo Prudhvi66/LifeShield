@@ -120,10 +120,10 @@ export const Navbar: React.FC = () => {
                   ? 'bg-purple-600 text-white border-purple-500 shadow-lg shadow-purple-600/30'
                   : 'bg-slate-800/90 text-purple-300 border-purple-800/60 hover:bg-purple-950/50'
               }`}
-              title="Open Hackathon Simulation Suite"
+              title="Open Simulation Suite"
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Demo Suite</span>
+              <span className="hidden sm:inline">Simulation Suite</span>
             </button>
 
             {/* Emergency SOS Header Button */}

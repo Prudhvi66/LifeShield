@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..auth import require_current_user
+from ..auth import require_current_user, get_current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/api/health", tags=["Health & Vitals"])
@@ -112,3 +112,96 @@ def get_health_trends(
             body_temperature=r.body_temperature,
         ))
     return trend_points
+
+
+@router.post("/hydration", response_model=schemas.HydrationLogOut)
+def log_hydration(
+    payload: schemas.HydrationCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user)
+):
+    if payload.id:
+        existing = db.get(models.HydrationLog, payload.id)
+        if existing:
+            return existing
+
+    entry_ts = payload.timestamp or datetime.now(timezone.utc)
+    if entry_ts.tzinfo is None:
+        entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+
+    log = models.HydrationLog(
+        id=payload.id if payload.id else models.new_id(),
+        user_id=current_user.id if current_user else None,
+        amount_ml=payload.amount_ml,
+        timestamp=entry_ts,
+        source=payload.source or "manual",
+        sync_status="synced"
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+@router.post("/hydration/batch", response_model=List[schemas.HydrationLogOut])
+def batch_sync_hydration(
+    payload: schemas.HydrationBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user)
+):
+    created_logs: List[models.HydrationLog] = []
+    for item in payload.readings:
+        if item.id:
+            existing = db.get(models.HydrationLog, item.id)
+            if existing:
+                created_logs.append(existing)
+                continue
+
+        entry_ts = item.timestamp or datetime.now(timezone.utc)
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+
+        log = models.HydrationLog(
+            id=item.id if item.id else models.new_id(),
+            user_id=current_user.id if current_user else None,
+            amount_ml=item.amount_ml,
+            timestamp=entry_ts,
+            source=item.source or "manual",
+            sync_status="synced"
+        )
+        db.add(log)
+        created_logs.append(log)
+
+    db.commit()
+    for l in created_logs:
+        db.refresh(l)
+    return created_logs
+
+
+@router.get("/hydration", response_model=schemas.HydrationSummaryOut)
+def get_hydration_summary(
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user)
+):
+    now = datetime.now(timezone.utc)
+    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    query = db.query(models.HydrationLog)
+    if current_user:
+        query = query.filter(models.HydrationLog.user_id == current_user.id)
+
+    today_logs = query.filter(models.HydrationLog.timestamp >= start_of_today).all()
+    today_total = sum(l.amount_ml for l in today_logs)
+    goal = 2000
+    pct = round((today_total / goal) * 100) if goal > 0 else 0
+    remaining = max(0, goal - today_total)
+
+    recent_logs = query.order_by(models.HydrationLog.timestamp.desc()).limit(20).all()
+
+    return schemas.HydrationSummaryOut(
+        today_total_ml=today_total,
+        goal_ml=goal,
+        percentage=pct,
+        remaining_ml=remaining,
+        recent_logs=recent_logs
+    )

@@ -28,7 +28,7 @@ import {
   formatHumanSourceLabel,
   formatHealthConnectStatus,
 } from "../../services/wearableSource";
-import { demoHealthService } from "../../services/demoHealthData";
+import { demoHealthService, HealthSourceState } from "../../services/demoHealthData";
 
 export interface WearablesViewProps {
   bleStatus: BLEDeviceStatus;
@@ -66,16 +66,17 @@ export interface WearablesViewProps {
     source?: string | null;
   };
   dataSource?: "real" | "demo" | "unavailable" | "not_connected";
+  healthSourceState?: HealthSourceState;
   isDemoMode?: boolean;
   onToggleDemoMode?: (enabled: boolean) => void;
 }
 
-// Realistic deterministic demonstration vitals (SIH Demonstration)
+// Deterministic baseline vitals (Simulated data)
 const DEMO_VITALS_SPEC = {
   heartRate: { value: 72, unit: "BPM", status: "Normal" },
   spo2: { value: 98, unit: "%", status: "Normal" },
-  steps: { value: "4,820", unit: "steps", status: "Today" },
-  sleep: { value: "7h 24m", unit: "", status: "Good" },
+  steps: { value: "6,420", unit: "steps", status: "Today" },
+  sleep: { value: "7h 20m", unit: "", status: "Good" },
   temperature: { value: "36.7", unit: "°C", status: "Normal" },
   hydration: { value: "62", unit: "%", status: "Good" },
 };
@@ -93,6 +94,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
   environment,
   health,
   dataSource = "demo",
+  healthSourceState,
   isDemoMode: isDemoModeProp,
   onToggleDemoMode,
 }) => {
@@ -176,17 +178,24 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
 
   // Determine Truthful Tri-State Architecture:
   // MODE B: Real verified data source connected with readings
-  const isRealDataMode = hasAnyHealthConnectRecord || hasBleLiveReading || dataSource === "real";
+  const isRealDataMode = healthSourceState
+    ? healthSourceState === "CONNECTED_REAL_DATA"
+    : (hasAnyHealthConnectRecord || hasBleLiveReading || dataSource === "real");
 
-  // MODE C: Health source is connected, but waiting for records
-  const isWaitingMode =
-    !isRealDataMode &&
-    (isBleConnected || (isAndroid && permissionSummary.grantedCount > 0) || dataSource === "unavailable");
+  // MODE C: Health source is connected, but waiting for records (CONNECTED_NO_DATA)
+  const isWaitingMode = healthSourceState
+    ? healthSourceState === "CONNECTED_NO_DATA"
+    : (!isRealDataMode &&
+      (isBleConnected || (isAndroid && permissionSummary.grantedCount > 0) || dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"));
 
-  // MODE A: Demo Mode when explicitly enabled and no real source active
+  // MODE A: Demo Mode / Fallback (active whenever simulated data is explicitly selected)
   const isDemoExplicitlyEnabled = isDemoModeProp ?? demoHealthService.isDemoModeEnabled();
-  const isDemoMode = !isRealDataMode && !isWaitingMode && (dataSource === "demo" || isDemoExplicitlyEnabled);
-  const isNotConnectedMode = !isRealDataMode && !isWaitingMode && !isDemoMode;
+  const isDemoMode = healthSourceState
+    ? healthSourceState === "SIMULATED_DATA"
+    : (!isRealDataMode && (dataSource === "demo" || isDemoExplicitlyEnabled || !isWaitingMode));
+  const isNotConnectedMode = healthSourceState
+    ? (healthSourceState === "NOT_CONNECTED" || healthSourceState === "PERMISSION_REQUIRED" || healthSourceState === "ERROR")
+    : (!isRealDataMode && !isWaitingMode && !isDemoMode);
 
   // Primary source identifier
   const activeSourceLabel = isRealDataMode
@@ -199,9 +208,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
     ? isBleConnected
       ? "Bluetooth Wearable"
       : "Health Connect"
-    : isDemoMode
-    ? "Simulated Demonstration"
-    : "Not Connected";
+    : "Simulated Data";
 
   return (
     <div
@@ -361,10 +368,10 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
                   letterSpacing: "0.04em",
                 }}
               >
-                🟣 DEMO DATA
+                🟣 SIMULATED DATA
               </span>
               <span style={{ fontSize: "13px", fontWeight: 700, color: "#4c1d95" }}>
-                Demo Mode Active
+                Simulated Data Active
               </span>
             </div>
 
@@ -513,7 +520,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
               lineHeight: "1.5",
             }}
           >
-            No real smartwatch or Health Connect data is currently linked. Turn on <strong>Demo Mode</strong> for presentations and SIH evaluation, or connect your wearable device.
+            No real smartwatch or Health Connect data is currently linked. Turn on <strong>Demo Mode</strong> to preview simulated health data, or connect your wearable device.
           </p>
         </div>
       )}
@@ -625,10 +632,10 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
                   flexShrink: 0,
                 }}
               >
-                🟡 CONNECTED
+                🟡 CONNECTED — NO DATA
               </span>
               <span style={{ fontSize: "13px", fontWeight: 700, color: "#78350f", wordBreak: "break-word", overflowWrap: "anywhere", minWidth: 0 }}>
-                Connected — Waiting for health data
+                Connected — No Data
               </span>
             </div>
 
@@ -704,7 +711,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
           </h2>
           <span style={{ fontSize: "12px", color: "#64748b", fontWeight: 500 }}>
             {isDemoMode
-              ? "Simulated demonstration"
+              ? "Simulated health data"
               : isRealDataMode
               ? "Live sensor records"
               : isWaitingMode
@@ -728,39 +735,38 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Heart style={{ width: 18, height: 18, color: "#e11d48" }} />}
             name="Heart Rate"
             value={
-              isRealDataMode
-                ? hrRecord
-                  ? healthConnectMetrics?.heart_rate?.value
-                  : health?.heart_rate || "Waiting"
-                : isWaitingMode
-                ? "Waiting"
+              isRealDataMode && (hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth")))
+                ? (healthConnectMetrics?.heart_rate?.value ?? health?.heart_rate)
                 : isDemoMode
                 ? (health?.heart_rate ?? DEMO_VITALS_SPEC.heartRate.value)
                 : "Unavailable"
             }
             unit={
-              isNotConnectedMode || isWaitingMode || (isRealDataMode && !hrRecord && !health?.heart_rate)
+              isRealDataMode && !(hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth"))) && !isDemoMode
                 ? ""
                 : "BPM"
             }
-            status={isNotConnectedMode ? "No Record" : "Normal"}
+            status={
+              isRealDataMode && !(hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth"))) && !isDemoMode
+                ? "No record"
+                : "Normal"
+            }
+            isWaiting={
+              !isDemoMode && !(hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth")))
+            }
             mode={
-              isRealDataMode && (hrRecord || health?.heart_rate)
+              isRealDataMode && (hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth")))
                 ? "real"
                 : isDemoMode
                 ? "demo"
                 : "waiting"
             }
             sourceLabel={
-              isRealDataMode
-                ? hrRecord
-                  ? "Health Connect"
-                  : health?.heart_rate
-                  ? "Bluetooth Wearable"
-                  : "Health Connect"
+              isRealDataMode && (hrRecord || (health?.heart_rate && health?.source?.includes("Bluetooth")))
+                ? (hrRecord ? "Health Connect" : "Bluetooth Wearable")
                 : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
+                ? "Simulated Data"
+                : "Health Connect"
             }
           />
 
@@ -769,39 +775,38 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Activity style={{ width: 18, height: 18, color: "#0284c7" }} />}
             name="Blood Oxygen"
             value={
-              isRealDataMode
-                ? spo2Record
-                  ? healthConnectMetrics?.spo2?.value
-                  : health?.spo2 || "Waiting"
-                : isWaitingMode
-                ? "Waiting"
+              isRealDataMode && (spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth")))
+                ? (healthConnectMetrics?.spo2?.value ?? health?.spo2)
                 : isDemoMode
                 ? (health?.spo2 ?? DEMO_VITALS_SPEC.spo2.value)
                 : "Unavailable"
             }
             unit={
-              isNotConnectedMode || isWaitingMode || (isRealDataMode && !spo2Record && !health?.spo2)
+              isRealDataMode && !(spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth"))) && !isDemoMode
                 ? ""
                 : "%"
             }
-            status={isNotConnectedMode ? "No Record" : "Normal"}
+            status={
+              isRealDataMode && !(spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth"))) && !isDemoMode
+                ? "No record"
+                : "Normal"
+            }
+            isWaiting={
+              !isDemoMode && !(spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth")))
+            }
             mode={
-              isRealDataMode && (spo2Record || health?.spo2)
+              isRealDataMode && (spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth")))
                 ? "real"
                 : isDemoMode
                 ? "demo"
                 : "waiting"
             }
             sourceLabel={
-              isRealDataMode
-                ? spo2Record
-                  ? "Health Connect"
-                  : health?.spo2
-                  ? "Bluetooth Wearable"
-                  : "Health Connect"
+              isRealDataMode && (spo2Record || (health?.spo2 && health?.source?.includes("Bluetooth")))
+                ? (spo2Record ? "Health Connect" : "Bluetooth Wearable")
                 : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
+                ? "Simulated Data"
+                : "Health Connect"
             }
           />
 
@@ -810,40 +815,21 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Footprints style={{ width: 18, height: 18, color: "#d97706" }} />}
             name="Steps"
             value={
-              isRealDataMode
-                ? stepsRecord
-                  ? (healthConnectMetrics?.steps?.value ?? 0).toLocaleString()
-                  : (health?.steps ?? "Waiting")
-                : isWaitingMode
-                ? "Waiting"
+              isRealDataMode && stepsRecord
+                ? (healthConnectMetrics?.steps?.value ?? 0).toLocaleString()
                 : isDemoMode
                 ? (typeof health?.steps === "number" ? health.steps.toLocaleString() : DEMO_VITALS_SPEC.steps.value)
                 : "Unavailable"
             }
             unit={
-              isNotConnectedMode || isWaitingMode || (isRealDataMode && !stepsRecord && !health?.steps)
-                ? ""
-                : "steps"
+              isRealDataMode && !stepsRecord && !isDemoMode ? "" : "steps"
             }
-            status={isNotConnectedMode ? "No Record" : "Today"}
-            mode={
-              isRealDataMode && (stepsRecord || health?.steps)
-                ? "real"
-                : isDemoMode
-                ? "demo"
-                : "waiting"
+            status={
+              isRealDataMode && !stepsRecord && !isDemoMode ? "No record" : "Today"
             }
-            sourceLabel={
-              isRealDataMode
-                ? stepsRecord
-                  ? "Health Connect"
-                  : health?.steps
-                  ? "Bluetooth Wearable"
-                  : "Health Connect"
-                : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
-            }
+            isWaiting={!isDemoMode && !stepsRecord}
+            mode={isRealDataMode && stepsRecord ? "real" : isDemoMode ? "demo" : "waiting"}
+            sourceLabel={isRealDataMode && stepsRecord ? "Health Connect" : isDemoMode ? "Simulated Data" : "Health Connect"}
           />
 
           {/* 4. Sleep */}
@@ -851,38 +837,19 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Moon style={{ width: 18, height: 18, color: "#6366f1" }} />}
             name="Sleep"
             value={
-              isRealDataMode
-                ? sleepRecord
-                  ? `${healthConnectMetrics?.sleep?.value}h`
-                  : health?.sleep
-                  ? `${health?.sleep}h`
-                  : "Waiting"
-                : isWaitingMode
-                ? "Waiting"
+              isRealDataMode && sleepRecord
+                ? `${healthConnectMetrics?.sleep?.value}h`
                 : isDemoMode
                 ? (health?.sleep ? `${health.sleep}h` : DEMO_VITALS_SPEC.sleep.value)
                 : "Unavailable"
             }
             unit=""
-            status={isNotConnectedMode ? "No Record" : "Good"}
-            mode={
-              isRealDataMode && (sleepRecord || health?.sleep)
-                ? "real"
-                : isDemoMode
-                ? "demo"
-                : "waiting"
+            status={
+              isRealDataMode && !sleepRecord && !isDemoMode ? "No record" : "Good"
             }
-            sourceLabel={
-              isRealDataMode
-                ? sleepRecord
-                  ? "Health Connect"
-                  : health?.sleep
-                  ? "Bluetooth Wearable"
-                  : "Health Connect"
-                : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
-            }
+            isWaiting={!isDemoMode && !sleepRecord}
+            mode={isRealDataMode && sleepRecord ? "real" : isDemoMode ? "demo" : "waiting"}
+            sourceLabel={isRealDataMode && sleepRecord ? "Health Connect" : isDemoMode ? "Simulated Data" : "Health Connect"}
           />
 
           {/* 5. Body Temperature */}
@@ -890,42 +857,21 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Thermometer style={{ width: 18, height: 18, color: "#ea580c" }} />}
             name="Body Temperature"
             value={
-              isRealDataMode
-                ? tempRecord
-                  ? healthConnectMetrics?.temperature?.value
-                  : health?.temperature || "Waiting"
-                : isWaitingMode
-                ? "Waiting"
+              isRealDataMode && tempRecord
+                ? healthConnectMetrics?.temperature?.value
                 : isDemoMode
                 ? (health?.temperature ? `${health.temperature}` : DEMO_VITALS_SPEC.temperature.value)
                 : "Unavailable"
             }
             unit={
-              isNotConnectedMode ||
-              isWaitingMode ||
-              (isRealDataMode && !tempRecord && !health?.temperature)
-                ? ""
-                : "°C"
+              isRealDataMode && !tempRecord && !isDemoMode ? "" : "°C"
             }
-            status={isNotConnectedMode ? "No Record" : "Normal"}
-            mode={
-              isRealDataMode && (tempRecord || health?.temperature)
-                ? "real"
-                : isDemoMode
-                ? "demo"
-                : "waiting"
+            status={
+              isRealDataMode && !tempRecord && !isDemoMode ? "No record" : "Normal"
             }
-            sourceLabel={
-              isRealDataMode
-                ? tempRecord
-                  ? "Health Connect"
-                  : health?.temperature
-                  ? "Bluetooth Wearable"
-                  : "Health Connect"
-                : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
-            }
+            isWaiting={!isDemoMode && !tempRecord}
+            mode={isRealDataMode && tempRecord ? "real" : isDemoMode ? "demo" : "waiting"}
+            sourceLabel={isRealDataMode && tempRecord ? "Health Connect" : isDemoMode ? "Simulated Data" : "Health Connect"}
           />
 
           {/* 6. Hydration */}
@@ -933,30 +879,17 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             icon={<Droplets style={{ width: 18, height: 18, color: "#06b6d4" }} />}
             name="Hydration"
             value={
-              isRealDataMode
-                ? health?.hydration ?? 68
-                : isWaitingMode
-                ? 68
+              health?.hydration && !isDemoMode
+                ? `${health.hydration}%`
                 : isDemoMode
                 ? (health?.hydration ?? DEMO_VITALS_SPEC.hydration.value)
                 : "Unavailable"
             }
-            unit={isNotConnectedMode ? "" : "%"}
-            status={isNotConnectedMode ? "No Record" : "Good"}
-            mode={
-              isRealDataMode
-                ? "real"
-                : isDemoMode
-                ? "demo"
-                : "waiting"
-            }
-            sourceLabel={
-              isRealDataMode
-                ? "Manual Log"
-                : isDemoMode
-                ? "DEMO DATA"
-                : "Not Connected"
-            }
+            unit={health?.hydration && !isDemoMode ? "" : isDemoMode ? "%" : ""}
+            status={health?.hydration && !isDemoMode ? "Logged" : isDemoMode ? "Good" : "No record"}
+            isWaiting={!isDemoMode && !health?.hydration}
+            mode={health?.hydration && !isDemoMode ? "real" : isDemoMode ? "demo" : "waiting"}
+            sourceLabel={health?.hydration && !isDemoMode ? "Manual Log" : isDemoMode ? "Simulated Data" : "Manual Log"}
           />
         </div>
       </div>
@@ -1210,7 +1143,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
             </div>
           </div>
 
-          {/* Source 3: Presentation Demo Data Mode */}
+          {/* Source 3: Demo Data */}
           <div
             style={{
               padding: "14px 16px",
@@ -1260,7 +1193,7 @@ export const WearablesView: React.FC<WearablesViewProps> = ({
                   </span>
                 </div>
                 <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-                  Realistic simulated vitals for SIH evaluation, offline preview & UI testing
+                  Realistic simulated vitals for preview & testing
                 </div>
               </div>
             </div>
@@ -1824,6 +1757,7 @@ interface VitalCardProps {
   status: string;
   mode: "real" | "demo" | "waiting";
   sourceLabel?: string;
+  isWaiting?: boolean;
 }
 
 const VitalCard: React.FC<VitalCardProps> = ({
@@ -1834,12 +1768,16 @@ const VitalCard: React.FC<VitalCardProps> = ({
   status,
   mode,
   sourceLabel,
+  isWaiting: explicitWaiting,
 }) => {
   const isWaiting =
-    mode === "waiting" ||
-    value === "Waiting" ||
-    value === null ||
-    value === undefined;
+    explicitWaiting !== undefined
+      ? explicitWaiting
+      : mode === "waiting" ||
+        value === "Waiting" ||
+        value === "Unavailable" ||
+        value === null ||
+        value === undefined;
 
   return (
     <div
@@ -1974,8 +1912,8 @@ const VitalCard: React.FC<VitalCardProps> = ({
           {mode === "real"
             ? `REAL DATA • ${sourceLabel || "Health Connect"}`
             : mode === "demo"
-            ? "DEMO DATA"
-            : `CONNECTED • ${sourceLabel || "Health Connect"}`}
+            ? "SIMULATED DATA"
+            : `WAITING • ${sourceLabel || "Health Connect"}`}
         </span>
       </div>
     </div>

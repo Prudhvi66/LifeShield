@@ -116,13 +116,13 @@ export const DemoControlPanel: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-black text-white">Hackathon Presentation Control</h3>
+                <h3 className="text-base font-black text-white">Simulation Control Panel</h3>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40">
-                  DEMO SUITE
+                  SIMULATION SUITE
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Trigger simulated anomalies and automated end-to-end emergency presentations.
+                Trigger simulated anomalies and test automated emergency response.
               </p>
             </div>
           </div>

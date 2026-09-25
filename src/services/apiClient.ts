@@ -436,6 +436,49 @@ class ApiClient {
     getTrends: (hours = 24) => this.request<any[]>(`/api/health/trends?hours=${hours}`),
   };
 
+  // --- Hydration Tracker ---
+  public hydration = {
+    logReading: (payload: { id?: string; amount_ml: number; timestamp?: string; source?: string }) =>
+      this.request<{
+        id: string;
+        user_id?: string | null;
+        amount_ml: number;
+        timestamp: string;
+        source: string;
+        sync_status: string;
+      }>('/api/health/hydration', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    syncBatch: (payload: { readings: Array<{ id?: string; amount_ml: number; timestamp?: string; source?: string }> }) =>
+      this.request<Array<{
+        id: string;
+        user_id?: string | null;
+        amount_ml: number;
+        timestamp: string;
+        source: string;
+        sync_status: string;
+      }>>('/api/health/hydration/batch', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    getSummary: () =>
+      this.request<{
+        today_total_ml: number;
+        goal_ml: number;
+        percentage: number;
+        remaining_ml: number;
+        recent_logs: Array<{
+          id: string;
+          user_id?: string | null;
+          amount_ml: number;
+          timestamp: string;
+          source: string;
+          sync_status: string;
+        }>;
+      }>('/api/health/hydration'),
+  };
+
   // --- Devices & Wearables ---
   public devices = {
     register: (payload: { device_name: string; device_type?: string; manufacturer?: string; battery_level?: number }) =>

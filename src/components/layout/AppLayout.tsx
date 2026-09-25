@@ -207,7 +207,7 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
                 {/* Language Picker */}
                 <LanguagePicker />
 
-                {/* Presentation Demo Mode Trigger */}
+                {/* Simulation Demo Mode Trigger */}
                 <button
                   onClick={() => setDemoPanelOpen(!demoPanelOpen)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${
@@ -215,10 +215,10 @@ export const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children })
                       ? 'bg-purple-600 text-white border-purple-500 shadow-md shadow-purple-600/30'
                       : 'bg-slate-900 text-purple-300 border-purple-900/60 hover:bg-purple-950/40'
                   }`}
-                  title="Toggle Hackathon Simulation Toolbar"
+                  title="Toggle Simulation Toolbar"
                 >
                   <Sliders className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">Demo Suite</span>
+                  <span className="hidden md:inline">Simulation Suite</span>
                 </button>
 
                 {/* Mobile SOS Button in header */}

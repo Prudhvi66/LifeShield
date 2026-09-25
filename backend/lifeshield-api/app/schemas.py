@@ -145,6 +145,37 @@ class HealthSummaryOut(BaseModel):
     status_message: str
 
 
+# --- Hydration ---
+class HydrationCreate(BaseModel):
+    id: Optional[str] = None
+    amount_ml: int = Field(default=250, ge=1, le=5000)
+    timestamp: Optional[datetime] = None
+    source: str = "manual"
+
+
+class HydrationBatchCreate(BaseModel):
+    readings: List[HydrationCreate]
+
+
+class HydrationLogOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: str
+    user_id: Optional[str] = None
+    amount_ml: int
+    timestamp: datetime
+    source: str
+    sync_status: str
+
+
+class HydrationSummaryOut(BaseModel):
+    today_total_ml: int
+    goal_ml: int
+    percentage: int
+    remaining_ml: int
+    recent_logs: List[HydrationLogOut]
+
+
 # --- Reminders ---
 class ReminderCreate(BaseModel):
     title: str

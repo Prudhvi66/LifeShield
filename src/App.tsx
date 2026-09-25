@@ -22,7 +22,7 @@ import { WearablesView } from "./components/wearables/WearablesView";
 import { HealthHistoryView } from "./components/history/HealthHistoryView";
 import { AlertsView } from "./components/alerts/AlertsView";
 import { HealthConnectMetricDetail, formatTimeAgo, formatHumanSourceLabel, formatHealthConnectStatus } from "./services/wearableSource";
-import { demoHealthService, DataSourceStatus } from "./services/demoHealthData";
+import { demoHealthService, HealthSourceState, DATA_SOURCE_LABELS } from "./services/demoHealthData";
 
 type Tab =
   | "home"
@@ -124,7 +124,8 @@ type ChatMessage = {
   source?: string;
 };
 
-export type HealthDataSource = "real" | "demo" | "unavailable" | "not_connected";
+export type LegacyDataSource = "real" | "demo" | "unavailable" | "not_connected";
+export type HealthDataSource = LegacyDataSource;
 
 export const EMPTY_HEALTH_VITALS: HealthData = {
   heart_rate: null,
@@ -147,14 +148,37 @@ export function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [activeModal, setActiveModal] = useState<ActiveModal>("none");
 
-  // Core Application State - Live telemetry when available or honest labeled demo vitals
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => demoHealthService.isDemoModeEnabled());
-  const [dataSource, setDataSource] = useState<HealthDataSource>(() =>
-    demoHealthService.isDemoModeEnabled() ? "demo" : "not_connected"
-  );
-  const [health, setHealth] = useState<HealthData>(() =>
-    demoHealthService.isDemoModeEnabled() ? demoHealthService.getDemoHealthData() : EMPTY_HEALTH_VITALS
-  );
+  // Single Source of Truth for Health Data Telemetry:
+  // NOT_CONNECTED | CONNECTED_NO_DATA | CONNECTED_REAL_DATA | SIMULATED_DATA | PERMISSION_REQUIRED | ERROR
+  const [healthSourceState, setHealthSourceState] = useState<HealthSourceState>(() => {
+    try {
+      const mode = localStorage.getItem("lifeshield_health_source_mode");
+      if (mode === "simulated") return "SIMULATED_DATA";
+      if (mode === "real") return "NOT_CONNECTED";
+    } catch { /* ignore */ }
+    return HealthConnectService.isNativeAndroid() ? "NOT_CONNECTED" : "SIMULATED_DATA";
+  });
+
+  // Derived legacy flags for full backwards compatibility
+  const isDemoMode = healthSourceState === "SIMULATED_DATA";
+  const dataSource: "real" | "demo" | "unavailable" | "not_connected" =
+    healthSourceState === "CONNECTED_REAL_DATA"
+      ? "real"
+      : healthSourceState === "SIMULATED_DATA"
+      ? "demo"
+      : healthSourceState === "CONNECTED_NO_DATA"
+      ? "unavailable"
+      : "not_connected";
+
+  const [health, setHealth] = useState<HealthData>(() => {
+    try {
+      const mode = localStorage.getItem("lifeshield_health_source_mode");
+      if (mode === "simulated" || (!mode && !HealthConnectService.isNativeAndroid())) {
+        return demoHealthService.getDemoHealthData();
+      }
+    } catch { /* ignore */ }
+    return EMPTY_HEALTH_VITALS;
+  });
   const [isAuthBootstrapping, setIsAuthBootstrapping] = useState<boolean>(() => Boolean(apiClient.getToken()));
   const [environment, setEnvironment] = useState<EnvironmentData>({});
   const [envLoading, setEnvLoading] = useState<boolean>(false);
@@ -220,6 +244,8 @@ export function App() {
   const [highHrValue, setHighHrValue] = useState<number | null>(null);
   const lastHrAlertTimeRef = useRef<number>(0);
   const countdownTimerRef = useRef<any>(null);
+
+
 
   // SOS Status & Duplicate Prevention
   const [sosStatus, setSosStatus] = useState<{
@@ -433,49 +459,165 @@ export function App() {
   }, []);
 
   // -------------------------------------------------------------
-  // DEMO DATA MODE SUBSCRIPTION & SUBTLE VALUE PROGRESSION
+  // SIMULATED DATA SUBSCRIPTION & SUBTLE VALUE PROGRESSION
   // -------------------------------------------------------------
   useEffect(() => {
     const unsub = demoHealthService.subscribe(() => {
-      const isEnabled = demoHealthService.isDemoModeEnabled();
-      setIsDemoMode(isEnabled);
-      setDataSource((prev) => {
-        if (prev === "real" || prev === "unavailable") return prev; // Real hardware always takes precedence!
-        return isEnabled ? "demo" : "not_connected";
-      });
-      setHealth((prev) => {
-        if (!demoHealthService.isDemoModeEnabled()) {
-          return prev.source === "Simulated Demonstration" ? EMPTY_HEALTH_VITALS : prev;
-        }
-        if (prev.source === "Simulated Demonstration" || !prev.source) {
-          return demoHealthService.getDemoHealthData();
-        }
-        return prev;
-      });
+      // ONLY advance simulated vitals when explicitly in SIMULATED_DATA mode!
+      if (healthSourceState !== "SIMULATED_DATA") {
+        return;
+      }
+      setHealth(demoHealthService.getDemoHealthData());
     });
     return unsub;
-  }, []);
+  }, [healthSourceState]);
+
+  // Explicit Simulated Data Selection
+  const handleSelectSimulatedData = () => {
+    try {
+      localStorage.setItem("lifeshield_health_source_mode", "simulated");
+    } catch { /* ignore */ }
+    demoHealthService.setDemoModeEnabled(true);
+    setHealthSourceState("SIMULATED_DATA");
+    setHealthConnectStatus("Simulated Data");
+    setHealth(demoHealthService.getDemoHealthData());
+    showToast("Simulated Data mode active.", "info");
+  };
+
+  // Requirement 5: 7-step sequence when selecting Real Device
+  const handleSelectRealDevice = async () => {
+    try {
+      localStorage.setItem("lifeshield_health_source_mode", "real");
+    } catch { /* ignore */ }
+    demoHealthService.setDemoModeEnabled(false);
+    setIsRefreshing(true);
+    showToast("Checking Health Connect availability & records...", "info");
+
+    try {
+      // 1. Check Health Connect availability
+      const avail = await HealthConnectService.checkAvailability();
+      if (!avail.isAvailable) {
+        setHealthSourceState("NOT_CONNECTED");
+        setHealth(EMPTY_HEALTH_VITALS);
+        setHealthConnectStatus("Not Connected");
+        showToast((avail as any).message || "Health Connect is not available on this device.", "warning");
+        return;
+      }
+
+      // 2. Check permissions
+      let perms = await HealthConnectService.checkPermissions();
+
+      // 3. Request permissions if necessary
+      if (!perms.permissionsGranted) {
+        const req = await HealthConnectService.requestPermissions().catch(() => null);
+        if (req && req.permissionsGranted) {
+          perms = req;
+        } else {
+          perms = await HealthConnectService.checkPermissions().catch(() => ({ permissionsGranted: false, permissions: {} }));
+        }
+      }
+
+      if (!perms.permissionsGranted) {
+        setHealthSourceState("PERMISSION_REQUIRED");
+        setHealth(EMPTY_HEALTH_VITALS);
+        setHealthConnectStatus("Permission Required");
+        showToast("Health Connect permissions required. Tap 'Grant Permissions' to authorize.", "warning");
+        return;
+      }
+
+      // 4. Read Health Connect records
+      const hcRes = await HealthConnectService.readAggregatedData();
+      if (hcRes.metrics) {
+        setHealthConnectMetrics(hcRes.metrics);
+      }
+
+      // 5. Determine whether records exist
+      const hr = hcRes.data?.heart_rate;
+      const spo2 = hcRes.data?.spo2;
+      const steps = hcRes.data?.steps;
+      const sleep = hcRes.data?.sleep;
+      const temp = hcRes.data?.temperature;
+
+      const hasHR = typeof hr === "number" && hr > 0 && hr < 300;
+      const hasSpO2 = typeof spo2 === "number" && spo2 > 0 && spo2 <= 100;
+      const hasSteps = typeof steps === "number" && steps >= 0;
+      const hasSleep = typeof sleep === "number" && sleep >= 0;
+      const hasTemp = typeof temp === "number" && temp > 30 && temp < 45;
+
+      const hasAnyRecord = hasHR || hasSpO2 || hasSteps || hasSleep || hasTemp;
+
+      // 6. Update single source-of-truth state
+      if (hasAnyRecord) {
+        const syncTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        setLastSyncTime(syncTime);
+        setHealthSourceState("CONNECTED_REAL_DATA");
+        setHealthConnectStatus("Connected — Real Data");
+        const realVitals: HealthData = {
+          heart_rate: hasHR ? hr! : null,
+          spo2: hasSpO2 ? spo2! : null,
+          steps: hasSteps ? steps! : null,
+          sleep: hasSleep ? sleep! : null,
+          temperature: hasTemp ? temp! : null,
+          hydration: null,
+          systolic_bp: null,
+          diastolic_bp: null,
+          calories: hasSteps ? Math.round(steps! * 0.04) : null,
+          respiratory_rate: null,
+          activity: hasSteps && steps! > 0 ? "Active" : null,
+          source: formatHumanSourceLabel(hcRes.source) || "Health Connect",
+          timestamp: new Date().toISOString(),
+        };
+        setHealth(realVitals);
+
+        apiClient.health.ingestReading({
+          heart_rate: hasHR ? hr! : undefined,
+          spo2: hasSpO2 ? spo2! : undefined,
+          steps: hasSteps ? steps! : undefined,
+          sleep_hours: hasSleep ? sleep! : undefined,
+          body_temperature: hasTemp ? temp! : undefined,
+          source: "Health Connect",
+        }).catch(() => {});
+
+        showToast(`Health Connect connected: Real data loaded (${hasSteps ? `${steps.toLocaleString()} steps` : "Records active"})`, "success");
+      } else {
+        setHealthSourceState("CONNECTED_NO_DATA");
+        setHealthConnectStatus("Connected — No Data");
+        setHealth(EMPTY_HEALTH_VITALS);
+        showToast("Connected — No Data: Health Connect authorized, but no records exist on device.", "info");
+      }
+      // 7. Refresh Home and Health pages (React state triggers synchronous re-render with identical healthSourceState)
+    } catch (err: any) {
+      console.error("[LifeShield Health] Real device check error:", err);
+      setHealthSourceState("ERROR");
+      setHealthConnectStatus("Connection Error");
+      setHealth(EMPTY_HEALTH_VITALS);
+      showToast("Health Connect error: " + (err.message || String(err)), "warning");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleRequestHealthConnectPermissions = async () => {
+    try {
+      showToast("Requesting Health Connect permissions...", "info");
+      const res = await HealthConnectService.requestPermissions();
+      if (res && res.permissionsGranted) {
+        showToast("Permissions granted! Syncing health data...", "success");
+        await handleSelectRealDevice();
+      } else {
+        await HealthConnectService.openSettings();
+        showToast("Please grant permissions in Health Connect settings and return.", "info");
+      }
+    } catch (e: any) {
+      showToast("Permission request error: " + (e.message || String(e)), "warning");
+    }
+  };
 
   const handleToggleDemoMode = (enabled: boolean) => {
-    demoHealthService.setDemoModeEnabled(enabled);
-    setIsDemoMode(enabled);
-    if (dataSource === "real") {
-      showToast(
-        enabled
-          ? "Demo Mode set to ON (Real wearable telemetry currently has active priority)"
-          : "Demo Mode turned off",
-        "info"
-      );
-      return;
-    }
     if (enabled) {
-      setDataSource("demo");
-      setHealth(demoHealthService.getDemoHealthData());
-      showToast("Demo Data Mode activated (Simulated data for presentation)", "info");
+      handleSelectSimulatedData();
     } else {
-      setDataSource("not_connected");
-      setHealth(EMPTY_HEALTH_VITALS);
-      showToast("Demo Data Mode disabled (Not Connected)", "info");
+      handleSelectRealDevice();
     }
   };
 
@@ -492,6 +634,8 @@ export function App() {
       });
     }
   }, []);
+
+
 
   // Register auth failure handler — clears user state on genuine 401
   useEffect(() => {
@@ -588,133 +732,105 @@ export function App() {
         }
       }
 
-      // 2. Health Data Resolution (Priority: Real Data -> Connected No Data -> Demo Data -> Not Connected)
-      let resolvedDataSource: HealthDataSource = "not_connected";
-      let resolvedHealth: HealthData = EMPTY_HEALTH_VITALS;
-      let resolvedSyncTime: string | null = null;
-      let hasRealHealthData = false;
+      // 2. Health Data Resolution (Single Source of Truth)
+      const isExplicitSimulated = demoHealthService.isDemoModeEnabled();
+      let hcIsAvailable = false;
+      let hcHasRealData = false;
+      let hcData: any = null;
+      let hcSource = "Health Connect";
+      let hcMetrics: any = undefined;
+      let hcAuthorized = false;
+      let hcPermNeeded = false;
+      let hcError: string | null = null;
 
-      // Check native Android Health Connect first
-      if (HealthConnectService.isNativeAndroid()) {
+      // Check native Android Health Connect if not explicitly in simulated mode
+      if (!isExplicitSimulated && HealthConnectService.isNativeAndroid()) {
         try {
-          const perms = await HealthConnectService.checkPermissions();
-          if (perms.permissionsGranted) {
-            const hcRes = await HealthConnectService.readAggregatedData();
-            if (hcRes.metrics) {
-              setHealthConnectMetrics(hcRes.metrics);
-            }
-
-            if (hcRes.hasData && hcRes.data) {
-              const hr = hcRes.data.heart_rate;
-              const spo2 = hcRes.data.spo2;
-              const steps = hcRes.data.steps;
-              const sleep = hcRes.data.sleep;
-              const temp = hcRes.data.temperature;
-
-              const hasHR = typeof hr === "number" && hr > 0 && hr < 300;
-              const hasSpO2 = typeof spo2 === "number" && spo2 > 0 && spo2 <= 100;
-              const hasSteps = typeof steps === "number" && steps >= 0;
-              const hasSleep = typeof sleep === "number" && sleep >= 0;
-              const hasTemp = typeof temp === "number" && temp > 30 && temp < 45;
-
-              if (hasHR || hasSpO2 || hasSteps || hasSleep || hasTemp) {
-                hasRealHealthData = true;
-                resolvedDataSource = "real";
-                const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-                resolvedSyncTime = timeStr;
-                resolvedHealth = {
-                  heart_rate: hasHR ? hr : null,
-                  spo2: hasSpO2 ? spo2 : null,
-                  steps: hasSteps ? steps : null,
-                  sleep: hasSleep ? sleep : null,
-                  temperature: hasTemp ? temp : null,
-                  hydration: 68,
-                  systolic_bp: null,
-                  diastolic_bp: null,
-                  source: formatHumanSourceLabel(hcRes.source),
-                  timestamp: new Date().toISOString(),
-                };
-                setHealthConnectStatus("Connected — Real Data");
-                console.log("[LifeShield Health] STATE: Connected — Real Data from", hcRes.source);
+          const avail = await HealthConnectService.checkAvailability();
+          hcIsAvailable = avail.isAvailable;
+          if (avail.isAvailable) {
+            const perms = await HealthConnectService.checkPermissions();
+            if (perms.permissionsGranted) {
+              hcAuthorized = true;
+              const hcRes = await HealthConnectService.readAggregatedData();
+              if (hcRes.metrics) {
+                hcMetrics = hcRes.metrics;
+                setHealthConnectMetrics(hcRes.metrics);
               }
-            }
 
-            if (!hasRealHealthData) {
-              // Connected/authorized, but no current health records found yet
-              resolvedDataSource = "unavailable";
-              resolvedHealth = {
-                heart_rate: null,
-                spo2: null,
-                steps: null,
-                sleep: null,
-                temperature: null,
-                hydration: null,
-                systolic_bp: null,
-                diastolic_bp: null,
-                source: "Health Connect",
-                timestamp: null,
-              };
-              setHealthConnectStatus("Connected — No Data");
-              console.log("[LifeShield Health] STATE: Connected — No Data (Health Connect has no current records)");
+              if (hcRes.hasData && hcRes.data) {
+                const hr = hcRes.data.heart_rate;
+                const spo2 = hcRes.data.spo2;
+                const steps = hcRes.data.steps;
+                const sleep = hcRes.data.sleep;
+                const temp = hcRes.data.temperature;
+
+                const hasHR = typeof hr === "number" && hr > 0 && hr < 300;
+                const hasSpO2 = typeof spo2 === "number" && spo2 > 0 && spo2 <= 100;
+                const hasSteps = typeof steps === "number" && steps >= 0;
+                const hasSleep = typeof sleep === "number" && sleep >= 0;
+                const hasTemp = typeof temp === "number" && temp > 30 && temp < 45;
+
+                if (hasHR || hasSpO2 || hasSteps || hasSleep || hasTemp) {
+                  hcHasRealData = true;
+                  hcData = {
+                    heart_rate: hasHR ? hr : null,
+                    spo2: hasSpO2 ? spo2 : null,
+                    steps: hasSteps ? steps : null,
+                    sleep: hasSleep ? sleep : null,
+                    temperature: hasTemp ? temp : null,
+                    hydration: null, // DO NOT fabricate hydration
+                    systolic_bp: null,
+                    diastolic_bp: null,
+                    calories: hasSteps ? Math.round(steps * 0.04) : null,
+                    respiratory_rate: null,
+                    activity: hasSteps && steps > 0 ? "Active" : null,
+                    source: formatHumanSourceLabel(hcRes.source),
+                    timestamp: new Date().toISOString(),
+                  };
+                  hcSource = formatHumanSourceLabel(hcRes.source);
+                }
+              }
+            } else {
+              hcPermNeeded = true;
             }
-          } else {
-            setHealthConnectStatus("Not Connected");
           }
         } catch (hcErr: any) {
           console.warn("[LifeShield Health] Health Connect check error:", hcErr);
-          setHealthConnectStatus("Not Connected");
-        }
-      } else {
-        setHealthConnectStatus("Not Connected");
-      }
-
-      // Check if Bluetooth GATT is actively streaming live data
-      if (bleStatus.isConnected && isBleLive) {
-        resolvedDataSource = "real";
-        resolvedHealth = {
-          ...resolvedHealth,
-          source: "Bluetooth GATT",
-          timestamp: new Date().toISOString(),
-        };
-      } else if (bleStatus.isConnected && !hasRealHealthData) {
-        resolvedDataSource = "unavailable";
-        resolvedHealth = {
-          heart_rate: null,
-          spo2: null,
-          steps: null,
-          sleep: null,
-          temperature: null,
-          hydration: null,
-          systolic_bp: null,
-          diastolic_bp: null,
-          source: "Bluetooth GATT",
-          timestamp: null,
-        };
-      }
-
-      // Priority 3 & 4: If no real source is active and no device is connected
-      if (!hasRealHealthData && resolvedDataSource !== "unavailable") {
-        if (demoHealthService.isDemoModeEnabled()) {
-          resolvedDataSource = "demo";
-          resolvedHealth = demoHealthService.getDemoHealthData();
-          setHealthConnectStatus((prev) =>
-            prev.includes("Connected") ? "Not Connected" : prev
-          );
-          console.log("[LifeShield Health] STATE: Demo Data Mode active for presentation.");
-        } else {
-          resolvedDataSource = "not_connected";
-          resolvedHealth = EMPTY_HEALTH_VITALS;
-          setHealthConnectStatus((prev) =>
-            prev.includes("Connected") ? "Not Connected" : prev
-          );
-          console.log("[LifeShield Health] STATE: Not Connected (Demo Mode disabled).");
+          hcError = hcErr.message || "Connection error";
         }
       }
+
+      // Central Source Evaluation
+      const snapshot = demoHealthService.evaluateHealthSource({
+        isExplicitSimulated,
+        hasRealBle: Boolean(bleStatus.isConnected && isBleLive && health.heart_rate),
+        bleVitals: {
+          heartRate: health.heart_rate,
+          spO2: health.spo2,
+          temperature: health.temperature,
+        },
+        bleDeviceName: bleStatus.deviceName,
+        bleTimestamp: health.timestamp,
+        isBleConnected: Boolean(bleStatus.isConnected),
+        isHealthConnectAvailable: hcIsAvailable,
+        hasRealHealthConnect: hcHasRealData,
+        healthConnectData: hcData,
+        healthConnectSource: hcSource,
+        healthConnectMetrics: hcMetrics,
+        isHealthConnectAuthorized: hcAuthorized,
+        isPermissionRequired: hcPermNeeded,
+        isError: Boolean(hcError),
+        errorMessage: hcError || undefined,
+      });
 
       setBackendOnline(true);
-      setHealth(resolvedHealth);
-      setDataSource(resolvedDataSource);
-      setLastSyncTime(resolvedSyncTime);
+      setHealth(snapshot.health);
+      setHealthSourceState(snapshot.status);
+      setHealthConnectStatus(DATA_SOURCE_LABELS[snapshot.status]);
+      if (snapshot.lastSyncTime) {
+        setLastSyncTime(snapshot.lastSyncTime);
+      }
 
       // 3. Environment (Real Open-Meteo)
       setEnvLoading(true);
@@ -794,6 +910,8 @@ export function App() {
         setBaselineSpo2Floor(bl.normal_spo2_min || 95);
       }
 
+
+
       // 8. Emergency Dispatch Preferences
       const dp = await apiClient.dispatch.get().catch(() => null);
       if (dp) {
@@ -858,7 +976,13 @@ export function App() {
       window.addEventListener("focus", handleForegroundResume);
     }
 
+    // Periodic gentle refresh every 30 seconds while app is in use
+    const periodicTimer = setInterval(() => {
+      loadData();
+    }, 30000);
+
     return () => {
+      clearInterval(periodicTimer);
       if (typeof window !== "undefined") {
         window.removeEventListener("devicemotion", handleMotion);
         window.removeEventListener("focus", handleForegroundResume);
@@ -868,6 +992,13 @@ export function App() {
       }
     };
   }, [loadData, fallDetectionActive]);
+
+  // Refresh source status when user navigates to health or wearables
+  useEffect(() => {
+    if (activeTab === "health" || activeTab === "wearables") {
+      loadData();
+    }
+  }, [activeTab, loadData]);
 
   // -------------------------------------------------------------
   // NATIVE FALL DETECTION SERVICE — STARTUP RESTORATION
@@ -1408,7 +1539,8 @@ export function App() {
             timestamp: new Date().toISOString(),
           }));
 
-          setDataSource("real");
+          setHealthSourceState("CONNECTED_REAL_DATA");
+          setHealthConnectStatus("Connected — Real Data");
           setIsBleLive(true);
           setLastSyncTime(new Date().toLocaleTimeString());
 
@@ -1432,6 +1564,7 @@ export function App() {
           setBleStatus({ isConnected: false });
           setIsBleLive(false);
           showToast("Bluetooth Smartwatch disconnected.", "warning");
+          loadData();
         }
       );
 
@@ -1440,6 +1573,8 @@ export function App() {
       if (status.isConnected) {
         setIsBleLive(true);
         setLastSyncTime(new Date().toLocaleTimeString());
+        setHealthSourceState("CONNECTED_REAL_DATA");
+        setHealthConnectStatus("Connected — Real Data");
         showToast(`Connected to ${status.deviceName || "BLE Health Device"}`, "success");
       } else if (status.errorMessage) {
         showToast(status.errorMessage, "warning");
@@ -1504,14 +1639,17 @@ export function App() {
             steps: hasValidSteps ? steps : null,
             sleep: hasValidSleep ? sleep : null,
             temperature: hasValidTemp ? temp : null,
-            hydration: 68,
+            hydration: null,
             systolic_bp: null,
             diastolic_bp: null,
-            source: formatHumanSourceLabel((syncResult as any).source),
+            calories: hasValidSteps ? Math.round(steps * 0.04) : null,
+            respiratory_rate: null,
+            activity: hasValidSteps && steps > 0 ? "Active" : null,
+            source: formatHumanSourceLabel((syncResult as any).source) || "Health Connect",
             timestamp: new Date().toISOString(),
           });
 
-          setDataSource("real");
+          setHealthSourceState("CONNECTED_REAL_DATA");
           setHealthConnectStatus("Connected — Real Data");
 
           // Ingest into backend database
@@ -1527,60 +1665,30 @@ export function App() {
           showToast(`Health Connect Synced: ${updatedMetricsCount} health metrics updated (Last synced: ${syncTimeStr})`, "success");
         } else {
           // STATE 2: Connected, but no usable health records
-          setDataSource("unavailable");
-          setHealth({
-            heart_rate: null,
-            spo2: null,
-            steps: null,
-            sleep: null,
-            temperature: null,
-            hydration: null,
-            systolic_bp: null,
-            diastolic_bp: null,
-            source: "Health Connect",
-            timestamp: null,
-          });
-          const emptyMsg = "Connected — No Data: Device connected, but no current health data is available in Health Connect.";
+          setHealthSourceState("CONNECTED_NO_DATA");
+          setHealth(EMPTY_HEALTH_VITALS);
           setHealthConnectStatus("Connected — No Data");
-          showToast(emptyMsg, "info");
+          showToast("Connected — No Data: Device connected, but no current records available in Health Connect.", "info");
         }
       } else {
         const isPerm = syncResult.message?.toLowerCase().includes("permission");
-        setHealthConnectStatus(isPerm ? "Permission Required" : formatHealthConnectStatus(syncResult.message));
+        setHealthSourceState(isPerm ? "PERMISSION_REQUIRED" : "NOT_CONNECTED");
+        setHealthConnectStatus(isPerm ? "Permission Required" : "Not Connected");
+        setHealth(EMPTY_HEALTH_VITALS);
         showToast(syncResult.message, "warning");
       }
     } catch (err: any) {
       const msg = "Health Connect sync error: " + (err.message || String(err));
-      setHealthConnectStatus(msg);
+      setHealthSourceState("ERROR");
+      setHealthConnectStatus("Connection Error");
+      setHealth(EMPTY_HEALTH_VITALS);
       showToast(msg, "warning");
     } finally {
       setIsSyncingHealthConnect(false);
     }
   };
 
-  // -------------------------------------------------------------
-  // REAL HYDRATION TRACKING & LOGGING
-  // -------------------------------------------------------------
-  const handleLogHydration = async () => {
-    const currentHydration = health.hydration || 40;
-    const newHydration = Math.min(100, currentHydration + 10);
 
-    setHealth((prev) => ({
-      ...prev,
-      hydration: newHydration,
-    }));
-
-    try {
-      await apiClient.health.ingestReading({
-        hydration_index: newHydration,
-        source: "Manual Hydration Log",
-      });
-      voiceTtsService.speakRaw("Hydration confirmed. 250 milliliters added to daily baseline.", voiceSettings.language);
-      showToast("+250ml water recorded for today's fluid baseline.", "success");
-    } catch (e: any) {
-      showToast("Could not sync hydration reading: " + e.message, "warning");
-    }
-  };
 
   // -------------------------------------------------------------
   // MANUAL VITALS LOGGING
@@ -1932,7 +2040,7 @@ export function App() {
               : "NOT_CONNECTED",
           simulationNote:
             dataSource === "demo"
-              ? "These are simulated demo readings for presentation/testing. Not from a real wearable."
+              ? "These are simulated health readings. Not from a real wearable."
               : undefined,
         },
         environment: {
@@ -2300,15 +2408,19 @@ export function App() {
             onOpenReminders={() => setActiveModal("reminders")}
             onOpenLogVitals={() => setActiveModal("manual_vitals")}
             onOpenEnvironment={() => setActiveModal("environment")}
-            onLogHydration={handleLogHydration}
+            baselineRestingHr={baselineRestingHr}
             dataSource={dataSource}
+            healthSourceState={healthSourceState}
             lastSyncTime={lastSyncTime}
             selectedRegion={selectedRegion}
             onRegionChange={setSelectedRegion}
             envLoading={envLoading}
             envError={envError}
             isDemoMode={isDemoMode}
+            onSelectRealDevice={handleSelectRealDevice}
+            onSelectSimulatedData={handleSelectSimulatedData}
             onToggleDemoMode={handleToggleDemoMode}
+            healthConnectStatus={healthConnectStatus}
           />
         )}
 
@@ -2326,7 +2438,12 @@ export function App() {
             onOpenDeviceModal={() => setActiveModal("device")}
             onOpenLogVitals={() => setActiveModal("manual_vitals")}
             dataSource={dataSource}
+            healthSourceState={healthSourceState}
             isDemoMode={isDemoMode}
+            onSelectRealDevice={handleSelectRealDevice}
+            onSelectSimulatedData={handleSelectSimulatedData}
+            onSyncHealthConnect={handleHealthConnectSync}
+            onRequestPermissions={handleRequestHealthConnectPermissions}
             onToggleDemoMode={handleToggleDemoMode}
           />
         )}
@@ -2439,6 +2556,7 @@ export function App() {
               environment={environment}
               health={health}
               dataSource={dataSource}
+              healthSourceState={healthSourceState}
               isDemoMode={isDemoMode}
               onToggleDemoMode={handleToggleDemoMode}
             />
@@ -3020,6 +3138,7 @@ export function App() {
               environment={environment}
               health={health}
               dataSource={dataSource}
+              healthSourceState={healthSourceState}
               isDemoMode={isDemoMode}
               onToggleDemoMode={handleToggleDemoMode}
             />
@@ -3812,6 +3931,135 @@ export function App() {
 /* =========================================================
    1. HOME SCREEN COMPONENT
 ========================================================= */
+interface SafetyAdvisoryData {
+  title: string;
+  recommendation: string;
+  icon: string;
+  iconColorClass: "orange" | "blue" | "peach";
+  sourceLabel: string;
+}
+
+function getSafetyAdvisory(
+  environment: EnvironmentData,
+  health: HealthData,
+  baselineRestingHr: number = 72,
+  dataSource: HealthDataSource = "demo",
+  envError?: boolean,
+  envLoading?: boolean
+): SafetyAdvisoryData {
+  const isEnvLive = !envError && !envLoading && (environment.temperature !== undefined || environment.aqi !== undefined);
+  const envSourceLabel = isEnvLive ? "Based on live environmental data" : "Based on environmental data";
+  const healthSourceLabel = dataSource === "real" ? "Based on connected health data" : "Health values are simulated";
+
+  // 1. Flood risk is elevated
+  const floodRisk = environment.flood_risk_level?.toLowerCase() || "";
+  const hasFloodAdvisory = (environment.advisories || []).some((a: any) =>
+    (typeof a === "string" ? a : `${a?.title || ""} ${a?.description || ""}`).toLowerCase().includes("flood")
+  );
+  if (floodRisk.includes("high") || floodRisk.includes("severe") || floodRisk.includes("moderate") || hasFloodAdvisory) {
+    return {
+      title: "Flood risk is elevated",
+      recommendation: "Avoid low-lying areas and follow local safety advisories.",
+      icon: "🌊",
+      iconColorClass: "blue",
+      sourceLabel: envSourceLabel,
+    };
+  }
+
+  // 2. Heat index / exposure is elevated
+  const temp = environment.temperature ?? 0;
+  const heatIndex = environment.heat_index ?? temp;
+  if (heatIndex >= 38 || temp >= 38) {
+    return {
+      title: "Heat exposure is elevated",
+      recommendation: "Limit prolonged outdoor exposure and take regular breaks.",
+      icon: "☀️",
+      iconColorClass: "orange",
+      sourceLabel: envSourceLabel,
+    };
+  }
+
+  // 3. UV index is high
+  const uv = environment.uv_index ?? 0;
+  if (uv >= 8) {
+    return {
+      title: "UV exposure is high",
+      recommendation: "Limit direct sun exposure and use appropriate sun protection.",
+      icon: "🕶️",
+      iconColorClass: "peach",
+      sourceLabel: envSourceLabel,
+    };
+  }
+
+  // 4. Air quality needs attention
+  const aqi = environment.aqi ?? 0;
+  const pm25 = environment.pm2_5 ?? 0;
+  const aqiLevel = environment.aqi_level?.toLowerCase() || "";
+  if (aqi >= 150 || pm25 >= 55 || aqiLevel.includes("unhealthy") || aqiLevel.includes("poor")) {
+    return {
+      title: "Air quality needs attention",
+      recommendation: "Reduce prolonged outdoor activity and follow local air-quality guidance.",
+      icon: "🌫️",
+      iconColorClass: "blue",
+      sourceLabel: envSourceLabel,
+    };
+  }
+
+  // 5. Heart rate needs attention
+  const hr = health.heart_rate;
+  const hrThreshold = (baselineRestingHr || 72) + 25;
+  if (hr && hr > hrThreshold && hr > 95) {
+    return {
+      title: "Heart rate needs attention",
+      recommendation: "Pause activity and check how you feel.",
+      icon: "💓",
+      iconColorClass: "peach",
+      sourceLabel: healthSourceLabel,
+    };
+  }
+
+  // 6. SpO2 needs attention
+  const spo2 = health.spo2;
+  if (spo2 && spo2 < 93) {
+    return {
+      title: "Oxygen level needs attention",
+      recommendation: "Rest quietly in a well-ventilated space and monitor how you feel.",
+      icon: "◉",
+      iconColorClass: "blue",
+      sourceLabel: healthSourceLabel,
+    };
+  }
+
+  // 7. Moderate heat / warm ambient conditions
+  if (heatIndex >= 32 || temp >= 32) {
+    return {
+      title: "Warm ambient conditions",
+      recommendation: "Take precautions during outdoor activity and maintain regular rest breaks.",
+      icon: "🌡️",
+      iconColorClass: "orange",
+      sourceLabel: envSourceLabel,
+    };
+  }
+
+  // 8. Conditions look stable
+  const stableSourceLabel =
+    dataSource === "real" && isEnvLive
+      ? "Based on connected health and live environmental data"
+      : dataSource === "real"
+      ? "Based on connected health data"
+      : isEnvLive
+      ? "Based on live environmental data"
+      : "Health values are simulated";
+
+  return {
+    title: "Conditions look stable",
+    recommendation: "Continue following your normal health and safety routine.",
+    icon: "🛡️",
+    iconColorClass: "blue",
+    sourceLabel: stableSourceLabel,
+  };
+}
+
 function HomeScreen({
   health,
   environment,
@@ -3826,15 +4074,19 @@ function HomeScreen({
   onOpenReminders,
   onOpenLogVitals,
   onOpenEnvironment,
-  onLogHydration,
+  baselineRestingHr,
   dataSource,
+  healthSourceState,
   lastSyncTime,
   selectedRegion,
   onRegionChange,
   envLoading,
   envError,
   isDemoMode,
+  onSelectRealDevice,
+  onSelectSimulatedData,
   onToggleDemoMode,
+  healthConnectStatus,
 }: {
   health: HealthData;
   environment: EnvironmentData;
@@ -3849,17 +4101,22 @@ function HomeScreen({
   onOpenReminders: () => void;
   onOpenLogVitals: () => void;
   onOpenEnvironment: () => void;
-  onLogHydration: () => void;
+  baselineRestingHr?: number;
   dataSource: HealthDataSource;
+  healthSourceState: HealthSourceState;
   lastSyncTime: string | null;
   selectedRegion: string;
   onRegionChange: (region: string) => void;
   envLoading?: boolean;
   envError?: boolean;
   isDemoMode?: boolean;
+  onSelectRealDevice?: () => void;
+  onSelectSimulatedData?: () => void;
   onToggleDemoMode?: (enabled: boolean) => void;
+  healthConnectStatus?: string;
 }) {
   const nextMedicine = reminders.find((r) => r.reminder_type === "Medicine") || reminders[0];
+  const advisory = getSafetyAdvisory(environment, health, baselineRestingHr, dataSource, envError, envLoading);
 
   const [regionPickerOpen, setRegionPickerOpen] = useState(false);
 
@@ -3915,24 +4172,24 @@ function HomeScreen({
       <section className="health-score-card">
         <div className="score-content">
           <div className="score-label">
-            {dataSource === "demo"
-              ? "DEMO RISK ASSESSMENT"
-              : dataSource === "not_connected"
-              ? "CLINICAL RISK EVALUATION — NO TELEMETRY"
-              : "DYNAMIC CLINICAL RISK EVALUATION"}
+            {healthSourceState === "SIMULATED_DATA"
+              ? "RISK ASSESSMENT"
+              : healthSourceState === "NOT_CONNECTED" || healthSourceState === "PERMISSION_REQUIRED"
+              ? "CLINICAL RISK ASSESSMENT — NO TELEMETRY"
+              : "DYNAMIC CLINICAL RISK ASSESSMENT"}
           </div>
           <div className="score-title">
-            {dataSource === "demo"
-              ? `Demo Assessment: ${riskTier} Risk (${riskScore}/100)`
-              : dataSource === "not_connected"
+            {healthSourceState === "SIMULATED_DATA"
+              ? `Risk Assessment: ${riskTier} Risk (${riskScore}/100)`
+              : healthSourceState === "NOT_CONNECTED" || healthSourceState === "PERMISSION_REQUIRED"
               ? "Status: Telemetry Inactive"
               : `Status: ${riskTier} Risk (${riskScore}/100)`}
           </div>
           <div className="score-description">
-            {dataSource === "demo"
-              ? "Calculated from simulated demonstration vitals for presentation. Connect your watch or Health Connect to activate live clinical evaluation."
-              : dataSource === "not_connected"
-              ? "No live physiological telemetry or demo data active. Connect a wearable, sync Health Connect, or enable Demo Data mode to calculate clinical risk evaluation."
+            {healthSourceState === "SIMULATED_DATA"
+              ? "Based on simulated health data. Select Real Device or connect Health Connect to use live health data."
+              : healthSourceState === "NOT_CONNECTED" || healthSourceState === "PERMISSION_REQUIRED"
+              ? "No live physiological telemetry active. Connect a wearable or Health Connect to calculate live risk assessment."
               : "Transparent composite based on heart rate, SpO2, temperature, sleep, blood pressure, AQI, heat index, and flood risk. Safety indicator only — not a clinical diagnosis."}
           </div>
           {riskFactors.length > 0 && (
@@ -3958,7 +4215,7 @@ function HomeScreen({
 
         <div className="score-ring">
           <div className="score-ring-inner">
-            <strong>{dataSource === "not_connected" ? "—" : riskScore}</strong>
+            <strong>{healthSourceState === "NOT_CONNECTED" || healthSourceState === "PERMISSION_REQUIRED" ? "—" : riskScore}</strong>
             <span>Risk Score</span>
           </div>
         </div>
@@ -3980,22 +4237,28 @@ function HomeScreen({
                 fontSize: "10px",
                 fontWeight: 700,
                 background:
-                  dataSource === "real"
+                  healthSourceState === "CONNECTED_REAL_DATA"
                     ? "#ecfdf5"
-                    : dataSource === "demo"
+                    : healthSourceState === "SIMULATED_DATA"
                     ? "#f5f3ff"
+                    : healthSourceState === "CONNECTED_NO_DATA" || healthSourceState === "PERMISSION_REQUIRED"
+                    ? "#fffbeb"
                     : "#f1f5f9",
                 color:
-                  dataSource === "real"
+                  healthSourceState === "CONNECTED_REAL_DATA"
                     ? "#16a34a"
-                    : dataSource === "demo"
+                    : healthSourceState === "SIMULATED_DATA"
                     ? "#7c3aed"
+                    : healthSourceState === "CONNECTED_NO_DATA" || healthSourceState === "PERMISSION_REQUIRED"
+                    ? "#d97706"
                     : "#64748b",
                 border: `1px solid ${
-                  dataSource === "real"
+                  healthSourceState === "CONNECTED_REAL_DATA"
                     ? "#bbf7d0"
-                    : dataSource === "demo"
+                    : healthSourceState === "SIMULATED_DATA"
                     ? "#ddd6fe"
+                    : healthSourceState === "CONNECTED_NO_DATA" || healthSourceState === "PERMISSION_REQUIRED"
+                    ? "#fde68a"
                     : "#e2e8f0"
                 }`,
               }}
@@ -4006,31 +4269,41 @@ function HomeScreen({
                   height: "6px",
                   borderRadius: "50%",
                   background:
-                    dataSource === "real"
+                    healthSourceState === "CONNECTED_REAL_DATA"
                       ? "#16a34a"
-                      : dataSource === "demo"
+                      : healthSourceState === "SIMULATED_DATA"
                       ? "#7c3aed"
+                      : healthSourceState === "CONNECTED_NO_DATA" || healthSourceState === "PERMISSION_REQUIRED"
+                      ? "#d97706"
+                      : healthSourceState === "ERROR"
+                      ? "#ef4444"
                       : "#94a3b8",
                 }}
               />
-              {dataSource === "real"
+              {healthSourceState === "CONNECTED_REAL_DATA"
                 ? "● LIVE DATA"
-                : dataSource === "demo"
-                ? "🟣 DEMO DATA"
-                : dataSource === "unavailable"
-                ? "— WAITING FOR RECORDS"
-                : "⚪ NOT CONNECTED"}
+                : healthSourceState === "CONNECTED_NO_DATA"
+                ? "Connected — No Data"
+                : healthSourceState === "PERMISSION_REQUIRED"
+                ? "Permission Required"
+                : healthSourceState === "SIMULATED_DATA"
+                ? "Simulated Data"
+                : healthSourceState === "ERROR"
+                ? "Connection Error"
+                : "Not Connected"}
             </span>
             <span style={{ fontSize: "11px", color: "#64748b" }}>
-              {dataSource === "real"
-                ? `Source: ${health.source || "Health Connect"}`
-                : dataSource === "demo"
-                ? "Simulated values for presentation"
-                : dataSource === "unavailable"
-                ? "Source: Connected — awaiting reading"
-                : "No device connected • Demo mode OFF"}
+              {healthSourceState === "CONNECTED_REAL_DATA"
+                ? `Source: ${formatHumanSourceLabel(health.source)}`
+                : healthSourceState === "CONNECTED_NO_DATA"
+                ? "Source: Health Connect (no records)"
+                : healthSourceState === "PERMISSION_REQUIRED"
+                ? "Source: Health Connect (permission needed)"
+                : healthSourceState === "SIMULATED_DATA"
+                ? "Data source: Simulated"
+                : "Source: Not Connected"}
             </span>
-            {lastSyncTime && (
+            {healthSourceState === "CONNECTED_REAL_DATA" && lastSyncTime && (
               <span style={{ fontSize: "10px", color: "#94a3b8" }}>
                 Last synced: {lastSyncTime}
               </span>
@@ -4042,8 +4315,8 @@ function HomeScreen({
         </button>
       </section>
 
-      {/* DEMO NOTICE CALLOUT */}
-      {dataSource === "demo" && (
+      {/* SIMULATED DATA NOTICE CALLOUT */}
+      {healthSourceState === "SIMULATED_DATA" && (
         <div style={{
           background: "#f5f3ff",
           border: "1px solid #ddd6fe",
@@ -4059,17 +4332,17 @@ function HomeScreen({
           <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
             <span style={{ fontSize: "20px", flexShrink: 0 }}>🟣</span>
             <div style={{ minWidth: 0 }}>
-              <strong style={{ fontSize: "13px", color: "#5b21b6" }}>DEMO DATA MODE ACTIVE</strong>
+              <strong style={{ fontSize: "13px", color: "#5b21b6" }}>SIMULATED DATA</strong>
               <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#6d28d9" }}>
-                Simulating realistic vitals for presentation. Values are not real medical records.
+                Simulated health vitals active for demonstration.
               </p>
             </div>
           </div>
           <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {onToggleDemoMode && (
+            {onSelectRealDevice && (
               <button
                 type="button"
-                onClick={() => onToggleDemoMode(false)}
+                onClick={onSelectRealDevice}
                 style={{
                   background: "#ffffff",
                   color: "#6d28d9",
@@ -4082,7 +4355,7 @@ function HomeScreen({
                   whiteSpace: "nowrap",
                 }}
               >
-                Turn Off Demo
+                Use Real Device
               </button>
             )}
             <button
@@ -4107,7 +4380,7 @@ function HomeScreen({
       )}
 
       {/* NOT CONNECTED NOTICE CALLOUT */}
-      {dataSource === "not_connected" && (
+      {healthSourceState === "NOT_CONNECTED" && (
         <div style={{
           background: "#f8fafc",
           border: "1px solid #e2e8f0",
@@ -4123,17 +4396,17 @@ function HomeScreen({
           <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
             <span style={{ fontSize: "20px", flexShrink: 0 }}>⚪</span>
             <div style={{ minWidth: 0 }}>
-              <strong style={{ fontSize: "13px", color: "#334155" }}>NO WEARABLE CONNECTED</strong>
+              <strong style={{ fontSize: "13px", color: "#334155" }}>NO HEALTH SOURCE CONNECTED</strong>
               <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#64748b" }}>
-                Demo mode is OFF. Enable Demo Mode for presentation or pair a wearable.
+                Connect Health Connect or pair a smartwatch to see live vitals.
               </p>
             </div>
           </div>
           <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {onToggleDemoMode && (
+            {onSelectSimulatedData && (
               <button
                 type="button"
-                onClick={() => onToggleDemoMode(true)}
+                onClick={onSelectSimulatedData}
                 style={{
                   background: "#7c3aed",
                   color: "#ffffff",
@@ -4146,7 +4419,7 @@ function HomeScreen({
                   whiteSpace: "nowrap",
                 }}
               >
-                Enable Demo Mode
+                Simulated Data
               </button>
             )}
             <button
@@ -4164,14 +4437,61 @@ function HomeScreen({
                 whiteSpace: "nowrap",
               }}
             >
-              Pair Device
+              Connect Source
             </button>
           </div>
         </div>
       )}
 
-      {/* UNAVAILABLE NOTICE CALLOUT */}
-      {dataSource === "unavailable" && (
+      {/* PERMISSION REQUIRED CALLOUT */}
+      {healthSourceState === "PERMISSION_REQUIRED" && (
+        <div style={{
+          background: "#fffbeb",
+          border: "1px solid #fde68a",
+          borderRadius: "14px",
+          padding: "12px 16px",
+          margin: "12px 0 16px 0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+            <span style={{ fontSize: "20px", flexShrink: 0 }}>⚠️</span>
+            <div style={{ minWidth: 0 }}>
+              <strong style={{ fontSize: "13px", color: "#92400e" }}>HEALTH CONNECT PERMISSION REQUIRED</strong>
+              <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#b45309" }}>
+                Grant Health Connect permissions to read your live health records.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+            {onSelectRealDevice && (
+              <button
+                type="button"
+                onClick={onSelectRealDevice}
+                style={{
+                  background: "#d97706",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "6px 12px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Grant Permissions
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CONNECTED NO DATA CALLOUT */}
+      {healthSourceState === "CONNECTED_NO_DATA" && (
         <div style={{
           background: "#f8fafc",
           border: "1px solid #e2e8f0",
@@ -4184,9 +4504,9 @@ function HomeScreen({
         }}>
           <span style={{ fontSize: "20px" }}>ℹ️</span>
           <div>
-            <strong style={{ fontSize: "13px", color: "#334155" }}>NO LIVE DATA AVAILABLE</strong>
+            <strong style={{ fontSize: "13px", color: "#334155" }}>CONNECTED — NO RECORDS FOUND</strong>
             <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#64748b" }}>
-              Your health source is connected, but no recent reading is available.
+              Health Connect is connected and permissions are granted, but no readings were found on this device.
             </p>
           </div>
         </div>
@@ -4197,10 +4517,10 @@ function HomeScreen({
           <MiniHealthCard
             icon="♥"
             title="Heart Rate"
-            value={display(health.heart_rate)}
-            unit={available(health.heart_rate) ? "BPM" : "Unavailable"}
-            isLive={Boolean(dataSource === "real" && available(health.heart_rate))}
-            isDemo={Boolean(dataSource === "demo")}
+            value={available(health.heart_rate) ? display(health.heart_rate) : "Unavailable"}
+            unit={available(health.heart_rate) ? "BPM" : "No record found"}
+            isLive={Boolean(healthSourceState === "CONNECTED_REAL_DATA" && available(health.heart_rate))}
+            isDemo={Boolean(healthSourceState === "SIMULATED_DATA")}
             variant="peach"
           />
         </div>
@@ -4208,10 +4528,10 @@ function HomeScreen({
           <MiniHealthCard
             icon="◉"
             title="Blood Oxygen"
-            value={display(health.spo2)}
-            unit={available(health.spo2) ? "%" : "Unavailable"}
-            isLive={Boolean(dataSource === "real" && available(health.spo2))}
-            isDemo={Boolean(dataSource === "demo")}
+            value={available(health.spo2) ? display(health.spo2) : "Unavailable"}
+            unit={available(health.spo2) ? "%" : "No record found"}
+            isLive={Boolean(healthSourceState === "CONNECTED_REAL_DATA" && available(health.spo2))}
+            isDemo={Boolean(healthSourceState === "SIMULATED_DATA")}
             variant="lavender"
           />
         </div>
@@ -4219,10 +4539,10 @@ function HomeScreen({
           <MiniHealthCard
             icon="⌁"
             title="Steps"
-            value={display(health.steps)}
-            unit={available(health.steps) ? "steps" : "Unavailable"}
-            isLive={Boolean(dataSource === "real" && available(health.steps))}
-            isDemo={Boolean(dataSource === "demo")}
+            value={available(health.steps) ? health.steps!.toLocaleString() : "Unavailable"}
+            unit={available(health.steps) ? "steps" : "No record found"}
+            isLive={Boolean(healthSourceState === "CONNECTED_REAL_DATA" && available(health.steps))}
+            isDemo={Boolean(healthSourceState === "SIMULATED_DATA")}
             variant="cream"
           />
         </div>
@@ -4230,10 +4550,10 @@ function HomeScreen({
           <MiniHealthCard
             icon="◔"
             title="Sleep"
-            value={display(health.sleep)}
-            unit={available(health.sleep) ? "hours" : "Unavailable"}
-            isLive={Boolean(dataSource === "real" && available(health.sleep))}
-            isDemo={Boolean(dataSource === "demo")}
+            value={available(health.sleep) ? display(health.sleep) : "Unavailable"}
+            unit={available(health.sleep) ? "hours" : "No record found"}
+            isLive={Boolean(healthSourceState === "CONNECTED_REAL_DATA" && available(health.sleep))}
+            isDemo={Boolean(healthSourceState === "SIMULATED_DATA")}
             variant="pink"
           />
         </div>
@@ -4264,18 +4584,65 @@ function HomeScreen({
           <p>{nextMedicine ? `${nextMedicine.title} (${nextMedicine.dosage || "Daily"})` : "Tap to schedule medical doses."}</p>
         </button>
 
-        <button className="water-card" type="button" onClick={onLogHydration}>
-          <div className="medicine-top">
-            <div className="feature-icon blue">💧</div>
-            <span className="arrow-circle">+</span>
+        <button
+          className="water-card safety-advisory-card"
+          type="button"
+          onClick={onOpenEnvironment}
+          style={{
+            cursor: "pointer",
+            position: "relative",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            textAlign: "left",
+          }}
+          aria-label="Safety Advisory Details"
+        >
+          <div>
+            <div className="medicine-top">
+              <div className={`feature-icon ${advisory.iconColorClass}`}>{advisory.icon}</div>
+              <span className="arrow-circle" title="View details">→</span>
+            </div>
+            <div className="medicine-time">SAFETY ADVISORY</div>
+            <p style={{ margin: "2px 0 6px", fontSize: "10px", color: "#6b648e", fontWeight: 600 }}>
+              Personalized guidance based on your current health and environment.
+            </p>
+            <h3 style={{ fontSize: "18px", lineHeight: 1.15, margin: "4px 0 4px", color: "#3c3857" }}>
+              {advisory.title}
+            </h3>
+            <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#5b5575", lineHeight: 1.45 }}>
+              {advisory.recommendation}
+            </p>
           </div>
-          <div className="medicine-time">WELLNESS TRACKING</div>
-          <h3>
-            Hydration
-            <br />
-            tracker
-          </h3>
-          <p>Tap to record +250ml water and listen to multi-lingual audio confirmation.</p>
+
+          <div
+            style={{
+              marginTop: "12px",
+              paddingTop: "8px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "8px",
+              borderTop: "1px solid rgba(120, 110, 180, 0.15)",
+              flexWrap: "wrap",
+            }}
+          >
+            <span style={{ fontSize: "10px", color: "#6b648e", fontWeight: 600 }}>
+              {advisory.sourceLabel}
+            </span>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: 700,
+                color: "#4338ca",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "2px",
+              }}
+            >
+              View details →
+            </span>
+          </div>
         </button>
       </section>
 
@@ -4485,7 +4852,12 @@ function HealthScreen({
   onOpenDeviceModal,
   onOpenLogVitals,
   dataSource,
+  healthSourceState,
   isDemoMode,
+  onSelectRealDevice,
+  onSelectSimulatedData,
+  onSyncHealthConnect,
+  onRequestPermissions,
   onToggleDemoMode,
 }: {
   health: HealthData;
@@ -4500,9 +4872,16 @@ function HealthScreen({
   onOpenDeviceModal: () => void;
   onOpenLogVitals: () => void;
   dataSource: HealthDataSource;
+  healthSourceState?: HealthSourceState;
   isDemoMode?: boolean;
+  onSelectRealDevice?: () => void;
+  onSelectSimulatedData?: () => void;
+  onSyncHealthConnect?: () => void;
+  onRequestPermissions?: () => void;
   onToggleDemoMode?: (enabled: boolean) => void;
 }) {
+  const currentHealthState = healthSourceState || (isDemoMode ? "SIMULATED_DATA" : dataSource === "real" ? "CONNECTED_REAL_DATA" : "NOT_CONNECTED");
+
   return (
     <>
       <PageHeading
@@ -4512,74 +4891,72 @@ function HealthScreen({
       />
 
       {/* DATA SOURCE MODE SELECTOR */}
-      {onToggleDemoMode && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            background: "#ffffff",
-            border: "1px solid #e2e8f0",
-            borderRadius: "16px",
-            padding: "10px 16px",
-            marginBottom: "14px",
-            flexWrap: "wrap",
-            gap: "10px",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.03)",
-            boxSizing: "border-box",
-            width: "100%",
-            maxWidth: "100%",
-          }}
-        >
-          <div>
-            <div style={{ fontSize: "11px", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Data Source Mode
-            </div>
-            <div style={{ fontSize: "13px", fontWeight: 700, color: "#1e293b" }}>
-              {isDemoMode ? "🧪 Presentation Demo Mode" : "⌚ Real Hardware / Health Connect"}
-            </div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          background: "#ffffff",
+          border: "1px solid #e2e8f0",
+          borderRadius: "16px",
+          padding: "10px 16px",
+          marginBottom: "14px",
+          flexWrap: "wrap",
+          gap: "10px",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.03)",
+          boxSizing: "border-box",
+          width: "100%",
+          maxWidth: "100%",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: "11px", fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            DATA SOURCE MODE
           </div>
-
-          <div style={{ display: "inline-flex", background: "#f1f5f9", padding: "3px", borderRadius: "10px", gap: "3px" }}>
-            <button
-              type="button"
-              onClick={() => onToggleDemoMode(false)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: "8px",
-                border: "none",
-                fontSize: "11px",
-                fontWeight: 700,
-                cursor: "pointer",
-                background: !isDemoMode ? "#ffffff" : "transparent",
-                color: !isDemoMode ? "#1e293b" : "#64748b",
-                boxShadow: !isDemoMode ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                transition: "all 0.15s ease",
-              }}
-            >
-              Real Device
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleDemoMode(true)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: "8px",
-                border: "none",
-                fontSize: "11px",
-                fontWeight: 700,
-                cursor: "pointer",
-                background: isDemoMode ? "#7c3aed" : "transparent",
-                color: isDemoMode ? "#ffffff" : "#64748b",
-                boxShadow: isDemoMode ? "0 1px 3px rgba(124, 58, 237, 0.25)" : "none",
-                transition: "all 0.15s ease",
-              }}
-            >
-              Demo Data
-            </button>
+          <div style={{ fontSize: "13px", fontWeight: 700, color: "#1e293b" }}>
+            {currentHealthState === "SIMULATED_DATA" ? "🧪 Simulated Data" : "⌚ Real Device"}
           </div>
         </div>
-      )}
+
+        <div style={{ display: "inline-flex", background: "#f1f5f9", padding: "3px", borderRadius: "10px", gap: "3px" }}>
+          <button
+            type="button"
+            onClick={onSelectRealDevice}
+            style={{
+              padding: "6px 14px",
+              borderRadius: "8px",
+              border: "none",
+              fontSize: "11px",
+              fontWeight: 700,
+              cursor: "pointer",
+              background: currentHealthState !== "SIMULATED_DATA" ? "#ffffff" : "transparent",
+              color: currentHealthState !== "SIMULATED_DATA" ? "#1e293b" : "#64748b",
+              boxShadow: currentHealthState !== "SIMULATED_DATA" ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+              transition: "all 0.15s ease",
+            }}
+          >
+            Real Device
+          </button>
+          <button
+            type="button"
+            onClick={onSelectSimulatedData}
+            style={{
+              padding: "6px 14px",
+              borderRadius: "8px",
+              border: "none",
+              fontSize: "11px",
+              fontWeight: 700,
+              cursor: "pointer",
+              background: currentHealthState === "SIMULATED_DATA" ? "#7c3aed" : "transparent",
+              color: currentHealthState === "SIMULATED_DATA" ? "#ffffff" : "#64748b",
+              boxShadow: currentHealthState === "SIMULATED_DATA" ? "0 1px 3px rgba(124, 58, 237, 0.25)" : "none",
+              transition: "all 0.15s ease",
+            }}
+          >
+            Simulated Data
+          </button>
+        </div>
+      </div>
 
       {/* 1. HEALTH SOURCES CARD (ALWAYS SEPARATE FROM DEMO READINGS) */}
       <section className="connect-card">
@@ -4591,9 +4968,9 @@ function HealthScreen({
           <strong style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
             {bleStatus.isConnected
               ? `Connected: ${bleStatus.deviceName || "Smartwatch"}`
-              : dataSource === "real"
-              ? formatHumanSourceLabel(health.source) || "Health Connect"
-              : "Health Connect"}
+              : currentHealthState === "SIMULATED_DATA"
+              ? "Simulated Health Engine"
+              : formatHumanSourceLabel(health.source) || "Health Connect"}
           </strong>
           <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "4px", flexWrap: "wrap", minWidth: 0 }}>
             <span
@@ -4606,22 +4983,34 @@ function HealthScreen({
                 fontSize: "10px",
                 fontWeight: 700,
                 background:
-                  dataSource === "real"
+                  currentHealthState === "CONNECTED_REAL_DATA"
                     ? "#ecfdf5"
-                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    : currentHealthState === "CONNECTED_NO_DATA" || currentHealthState === "PERMISSION_REQUIRED"
                     ? "#fffbeb"
+                    : currentHealthState === "SIMULATED_DATA"
+                    ? "#f3e8ff"
+                    : currentHealthState === "ERROR"
+                    ? "#fef2f2"
                     : "#f1f5f9",
                 color:
-                  dataSource === "real"
+                  currentHealthState === "CONNECTED_REAL_DATA"
                     ? "#16a34a"
-                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    : currentHealthState === "CONNECTED_NO_DATA" || currentHealthState === "PERMISSION_REQUIRED"
                     ? "#d97706"
+                    : currentHealthState === "SIMULATED_DATA"
+                    ? "#7c3aed"
+                    : currentHealthState === "ERROR"
+                    ? "#ef4444"
                     : "#64748b",
                 border: `1px solid ${
-                  dataSource === "real"
+                  currentHealthState === "CONNECTED_REAL_DATA"
                     ? "#bbf7d0"
-                    : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                    : currentHealthState === "CONNECTED_NO_DATA" || currentHealthState === "PERMISSION_REQUIRED"
                     ? "#fde68a"
+                    : currentHealthState === "SIMULATED_DATA"
+                    ? "#ddd6fe"
+                    : currentHealthState === "ERROR"
+                    ? "#fecaca"
                     : "#e2e8f0"
                 }`,
                 flexShrink: 0,
@@ -4633,43 +5022,75 @@ function HealthScreen({
                   height: "6px",
                   borderRadius: "50%",
                   background:
-                    dataSource === "real"
+                    currentHealthState === "CONNECTED_REAL_DATA"
                       ? "#16a34a"
-                      : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                      : currentHealthState === "CONNECTED_NO_DATA" || currentHealthState === "PERMISSION_REQUIRED"
                       ? "#d97706"
-                      : "#94a3b8",
+                      : currentHealthState === "SIMULATED_DATA"
+                      ? "#7c3aed"
+                      : currentHealthState === "ERROR"
+                      ? "#ef4444"
+                      : "#64748b",
                 }}
               />
-              {dataSource === "real"
+              {currentHealthState === "CONNECTED_REAL_DATA"
                 ? "Connected — Real Data"
-                : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
+                : currentHealthState === "CONNECTED_NO_DATA"
                 ? "Connected — No Data"
+                : currentHealthState === "PERMISSION_REQUIRED"
+                ? "Permission Required"
+                : currentHealthState === "SIMULATED_DATA"
+                ? "Simulated Data"
+                : currentHealthState === "ERROR"
+                ? "Connection Error"
                 : "Not Connected"}
             </span>
-            {dataSource === "real" && lastSyncTime && (
+            {currentHealthState === "CONNECTED_REAL_DATA" && lastSyncTime && (
               <span style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap" }}>
                 Last synced: {lastSyncTime}
               </span>
             )}
           </div>
           <p style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
-            {dataSource === "real"
+            {currentHealthState === "CONNECTED_REAL_DATA"
               ? `Verified telemetry active via ${formatHumanSourceLabel(health.source)}.`
-              : dataSource === "unavailable" || healthConnectStatus === "Connected — No Data"
-              ? "Health source is connected, but no recent health records are available yet."
+              : currentHealthState === "CONNECTED_NO_DATA"
+              ? "Health Connect permissions granted, but no records exist."
+              : currentHealthState === "PERMISSION_REQUIRED"
+              ? "Health Connect permissions are required to read health records."
+              : currentHealthState === "SIMULATED_DATA"
+              ? "Explicit simulated mode active. No physical sensor telemetry connected."
               : "No physical wearable or Health Connect records connected."}
           </p>
         </div>
 
         <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-          <button type="button" onClick={onOpenDeviceModal}>
-            {bleStatus.isConnected ? "Manage Wearable" : "Connect Source"}
-          </button>
+          {bleStatus.isConnected ? (
+            <button type="button" onClick={onOpenDeviceModal}>
+              Manage Wearable
+            </button>
+          ) : currentHealthState === "CONNECTED_REAL_DATA" || currentHealthState === "CONNECTED_NO_DATA" ? (
+            <button type="button" onClick={onSyncHealthConnect || onRefresh}>
+              Refresh health data
+            </button>
+          ) : currentHealthState === "PERMISSION_REQUIRED" ? (
+            <button type="button" onClick={onRequestPermissions || onOpenDeviceModal}>
+              Grant Permissions
+            </button>
+          ) : currentHealthState === "SIMULATED_DATA" ? (
+            <button type="button" onClick={onSelectRealDevice}>
+              Use Real Device
+            </button>
+          ) : (
+            <button type="button" onClick={onOpenDeviceModal}>
+              Connect Source
+            </button>
+          )}
         </div>
       </section>
 
-      {/* 2. DEMO HEALTH READINGS CARD (SEPARATE, AS SPECIFIED IN REQUIREMENT 5) */}
-      {dataSource === "demo" && (
+      {/* 2. DEMO HEALTH READINGS CARD (SEPARATE, EXPLICIT SIMULATED DATA ONLY) */}
+      {currentHealthState === "SIMULATED_DATA" && (
         <section
           style={{
             background: "linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)",
@@ -4690,8 +5111,8 @@ function HealthScreen({
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <span style={{ fontSize: "20px" }}>🧪</span>
               <div>
-                <strong style={{ fontSize: "14px", color: "#4c1d95" }}>Demo Health Readings</strong>
-                <div style={{ fontSize: "11px", color: "#6d28d9" }}>Simulated for SIH Presentation & UI Demo</div>
+                <strong style={{ fontSize: "14px", color: "#4c1d95" }}>Simulated Health Readings</strong>
+                <div style={{ fontSize: "11px", color: "#6d28d9" }}>Simulated health data</div>
               </div>
             </div>
             <span
@@ -4708,7 +5129,7 @@ function HealthScreen({
                 letterSpacing: "0.04em",
               }}
             >
-              ● DEMO DATA
+              ● SIMULATED DATA
             </span>
           </div>
 
@@ -4762,24 +5183,22 @@ function HealthScreen({
             <span style={{ fontSize: "10px", color: "#6d28d9" }}>
               Values breathe gently in real time • Not real medical data
             </span>
-            {onToggleDemoMode && (
-              <button
-                type="button"
-                onClick={() => onToggleDemoMode(false)}
-                style={{
-                  background: "transparent",
-                  border: "1px solid #c4b5fd",
-                  borderRadius: "8px",
-                  padding: "4px 10px",
-                  fontSize: "10px",
-                  fontWeight: 700,
-                  color: "#6d28d9",
-                  cursor: "pointer",
-                }}
-              >
-                Turn Off Demo
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={onSelectRealDevice}
+              style={{
+                background: "transparent",
+                border: "1px solid #c4b5fd",
+                borderRadius: "8px",
+                padding: "4px 10px",
+                fontSize: "10px",
+                fontWeight: 700,
+                color: "#6d28d9",
+                cursor: "pointer",
+              }}
+            >
+              Use Real Device
+            </button>
           </div>
         </section>
       )}
@@ -4800,65 +5219,65 @@ function HealthScreen({
           title="Heart Rate"
           icon="♥"
           value={display(health.heart_rate)}
-          unit={available(health.heart_rate) ? "BPM" : "Unavailable"}
-          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
-          source={available(health.heart_rate) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
-          isLive={Boolean(dataSource === "real" && available(health.heart_rate))}
-          isDemo={Boolean(dataSource === "demo")}
+          unit="BPM"
+          reasonUnavailable="No record found"
+          source={available(health.heart_rate) ? (currentHealthState === "CONNECTED_REAL_DATA" ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : "Simulated Data") : undefined}
+          isLive={Boolean(currentHealthState === "CONNECTED_REAL_DATA" && available(health.heart_rate))}
+          isDemo={Boolean(currentHealthState === "SIMULATED_DATA" && available(health.heart_rate))}
           updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
-          onCheckHealthConnect={onOpenDeviceModal}
+          onCheckHealthConnect={currentHealthState === "NOT_CONNECTED" || currentHealthState === "PERMISSION_REQUIRED" ? onOpenDeviceModal : undefined}
           variant="peach"
         />
         <DetailedHealthCard
           title="Blood Oxygen"
           icon="◉"
           value={display(health.spo2)}
-          unit={available(health.spo2) ? "%" : "Unavailable"}
-          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
-          source={available(health.spo2) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
-          isLive={Boolean(dataSource === "real" && available(health.spo2))}
-          isDemo={Boolean(dataSource === "demo")}
+          unit="%"
+          reasonUnavailable="No record found"
+          source={available(health.spo2) ? (currentHealthState === "CONNECTED_REAL_DATA" ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : "Simulated Data") : undefined}
+          isLive={Boolean(currentHealthState === "CONNECTED_REAL_DATA" && available(health.spo2))}
+          isDemo={Boolean(currentHealthState === "SIMULATED_DATA" && available(health.spo2))}
           updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
-          onCheckHealthConnect={onOpenDeviceModal}
+          onCheckHealthConnect={currentHealthState === "NOT_CONNECTED" || currentHealthState === "PERMISSION_REQUIRED" ? onOpenDeviceModal : undefined}
           variant="lavender"
         />
         <DetailedHealthCard
           title="Steps"
           icon="⌁"
           value={display(health.steps)}
-          unit={available(health.steps) ? "steps" : "Unavailable"}
-          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
-          source={available(health.steps) ? formatHumanSourceLabel(health.source) : undefined}
-          isLive={Boolean(dataSource === "real" && available(health.steps))}
-          isDemo={Boolean(dataSource === "demo")}
+          unit="steps"
+          reasonUnavailable="No record found"
+          source={available(health.steps) ? (currentHealthState === "CONNECTED_REAL_DATA" ? formatHumanSourceLabel(health.source) : "Simulated Data") : undefined}
+          isLive={Boolean(currentHealthState === "CONNECTED_REAL_DATA" && available(health.steps))}
+          isDemo={Boolean(currentHealthState === "SIMULATED_DATA" && available(health.steps))}
           updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
-          onCheckHealthConnect={onOpenDeviceModal}
+          onCheckHealthConnect={currentHealthState === "NOT_CONNECTED" || currentHealthState === "PERMISSION_REQUIRED" ? onOpenDeviceModal : undefined}
           variant="blue"
         />
         <DetailedHealthCard
           title="Sleep Session"
           icon="◔"
           value={display(health.sleep)}
-          unit={available(health.sleep) ? "hours" : "Unavailable"}
-          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
-          source={available(health.sleep) ? formatHumanSourceLabel(health.source) : undefined}
-          isLive={Boolean(dataSource === "real" && available(health.sleep))}
-          isDemo={Boolean(dataSource === "demo")}
+          unit="hours"
+          reasonUnavailable="No record found"
+          source={available(health.sleep) ? (currentHealthState === "CONNECTED_REAL_DATA" ? formatHumanSourceLabel(health.source) : "Simulated Data") : undefined}
+          isLive={Boolean(currentHealthState === "CONNECTED_REAL_DATA" && available(health.sleep))}
+          isDemo={Boolean(currentHealthState === "SIMULATED_DATA" && available(health.sleep))}
           updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
-          onCheckHealthConnect={onOpenDeviceModal}
+          onCheckHealthConnect={currentHealthState === "NOT_CONNECTED" || currentHealthState === "PERMISSION_REQUIRED" ? onOpenDeviceModal : undefined}
           variant="pink"
         />
         <DetailedHealthCard
           title="Body Temperature"
           icon="♨"
           value={display(health.temperature)}
-          unit={available(health.temperature) ? "°C" : "Unavailable"}
-          reasonUnavailable={dataSource === "unavailable" ? "Your health source is connected, but no recent reading is available." : !isDemoMode ? "Demo mode is off. Enable Demo Mode or pair a watch to view readings." : "Connect your watch or Health Connect to see live readings."}
-          source={available(health.temperature) ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : undefined}
-          isLive={Boolean(dataSource === "real" && available(health.temperature))}
-          isDemo={Boolean(dataSource === "demo")}
+          unit="°C"
+          reasonUnavailable="No record found"
+          source={available(health.temperature) ? (currentHealthState === "CONNECTED_REAL_DATA" ? (bleStatus.isConnected && health.source?.includes("Bluetooth") ? "Bluetooth Wearable" : formatHumanSourceLabel(health.source)) : "Simulated Data") : undefined}
+          isLive={Boolean(currentHealthState === "CONNECTED_REAL_DATA" && available(health.temperature))}
+          isDemo={Boolean(currentHealthState === "SIMULATED_DATA" && available(health.temperature))}
           updatedAgo={health.timestamp ? formatTimeAgo(new Date(health.timestamp)) : undefined}
-          onCheckHealthConnect={onOpenDeviceModal}
+          onCheckHealthConnect={currentHealthState === "NOT_CONNECTED" || currentHealthState === "PERMISSION_REQUIRED" ? onOpenDeviceModal : undefined}
           variant="cream"
         />
       </section>
@@ -5379,10 +5798,10 @@ function ProfileScreen({
         {onToggleDemoMode && (
           <Setting
             icon="🧪"
-            title="Presentation Demo Data Mode"
+            title="Demo Data"
             description={
               isDemoMode
-                ? "Active: Simulating clinical vitals for SIH evaluation"
+                ? "Active: Simulating clinical vitals using simulated health data"
                 : "Disabled: Real wearable telemetry required"
             }
             badge={isDemoMode ? "DEMO ON" : "OFF"}
@@ -5459,9 +5878,9 @@ function MiniHealthCard({
         </div>
       )}
       {isDemo && !isUnavailable && (
-        <div style={{ fontSize: "9px", color: "#d97706", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px", marginTop: "3px" }}>
-          <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#d97706" }} />
-          DEMO DATA
+        <div style={{ fontSize: "9px", color: "#7c3aed", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px", marginTop: "3px" }}>
+          <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#7c3aed" }} />
+          SIMULATED DATA
         </div>
       )}
     </div>
@@ -5503,7 +5922,7 @@ function DetailedHealthCard({
         {isUnavailable ? "Unavailable" : value}
       </strong>
       <small style={{ color: isUnavailable ? "#94a3b8" : undefined }}>
-        {isUnavailable ? (reasonUnavailable || "No record found in Health Connect") : unit}
+        {isUnavailable ? (reasonUnavailable || "No record found") : unit}
       </small>
 
       {isUnavailable && onCheckHealthConnect && (
@@ -5530,16 +5949,16 @@ function DetailedHealthCard({
 
       {!isUnavailable && (
         <div style={{ marginTop: "8px", paddingTop: "6px", borderTop: "1px solid rgba(148, 163, 184, 0.15)", fontSize: "10px", textAlign: "left" }}>
-          <div style={{ color: "#94a3b8", overflowWrap: "anywhere", wordBreak: "break-word" }}>Source: {formatHumanSourceLabel(source) || (isDemo ? "Simulated Demo" : "Health Source")}</div>
+          <div style={{ color: "#94a3b8", overflowWrap: "anywhere", wordBreak: "break-word" }}>Source: {formatHumanSourceLabel(source) || (isDemo ? "Simulated Data" : "Health Source")}</div>
           {isLive ? (
             <div style={{ color: "#10b981", fontWeight: "bold", display: "flex", alignItems: "center", gap: "4px", marginTop: "2px" }}>
               <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10b981" }} />
               LIVE DATA • {updatedAgo || "active"}
             </div>
           ) : isDemo ? (
-            <div style={{ color: "#d97706", fontWeight: "bold", display: "flex", alignItems: "center", gap: "4px", marginTop: "2px" }}>
-              <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#d97706" }} />
-              DEMO DATA • Connect device for live
+            <div style={{ color: "#7c3aed", fontWeight: "bold", display: "flex", alignItems: "center", gap: "4px", marginTop: "2px" }}>
+              <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#7c3aed" }} />
+              SIMULATED DATA
             </div>
           ) : (
             <div style={{ color: "#64748b", marginTop: "2px" }}>

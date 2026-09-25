@@ -100,7 +100,7 @@ export class FallDetectionService {
   }
 
   /**
-   * Mock / Test fall injection for hackathons and demonstrations
+   * Simulated fall injection for testing and verification
    */
   public triggerSimulatedFall(callback?: FallCallback) {
     const event: FallDetectionEvent = {

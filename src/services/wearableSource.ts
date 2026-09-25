@@ -393,9 +393,10 @@ export interface NormalizedVitalsResultSet {
 export const DEMO_VITALS_DATA = {
   heartRate: 72,
   spo2: 98,
-  steps: 3245,
-  sleep: 7.2,
+  steps: 6420,
+  sleep: 7.33,
   temperature: 36.7,
+  hydration: 62,
 };
 
 export function resolveVitalsState(params: {
@@ -410,6 +411,7 @@ export function resolveVitalsState(params: {
   realSource?: string | null;
   isSyncing?: boolean;
   isScanning?: boolean;
+  isError?: boolean;
 }): VitalsStatusDescriptor {
   // 1. Connecting
   if (params.isSyncing || params.isScanning) {
@@ -447,10 +449,10 @@ export function resolveVitalsState(params: {
       displayStatus: 'Connected — No Data',
       badgeLabel: 'CONNECTED — NO DATA',
       badgeColor: 'warning',
-      explanation: 'Your watch is connected via Bluetooth, but no current health records are available.',
-      sourceLabel: 'Bluetooth GATT',
+      explanation: 'Your watch is connected via Bluetooth, but no current health records are available. Displaying simulated vitals for demonstration.',
+      sourceLabel: 'Demo Data',
       isReal: false,
-      isDemo: false,
+      isDemo: true,
     };
   }
 
@@ -460,50 +462,49 @@ export function resolveVitalsState(params: {
       displayStatus: 'Connected — No Data',
       badgeLabel: 'CONNECTED — NO DATA',
       badgeColor: 'warning',
-      explanation: 'Health Connect is connected, but no current health records are available. Ensure your companion app (e.g. NoiseFit, Samsung Health, or Wear OS) has sync enabled.',
-      sourceLabel: 'Health Connect',
+      explanation: 'Health Connect is connected, but no current health records are available yet. Displaying simulated vitals for demonstration.',
+      sourceLabel: 'Demo Data',
       isReal: false,
-      isDemo: false,
+      isDemo: true,
     };
   }
 
-  // 4. Bluetooth Off
+  // 4. Connection Error
+  if (params.isError) {
+    return {
+      state: 'CONNECTION_ERROR',
+      displayStatus: 'Connection Error',
+      badgeLabel: 'CONNECTION ERROR',
+      badgeColor: 'error',
+      explanation: 'Could not connect to health source. Displaying simulated vitals for demonstration.',
+      sourceLabel: 'Demo Data',
+      isReal: false,
+      isDemo: true,
+    };
+  }
+
+  // 5. Bluetooth Off
   if (params.bluetoothOff) {
     return {
       state: 'BLUETOOTH_OFF',
       displayStatus: 'Bluetooth Off',
       badgeLabel: 'BLUETOOTH OFF',
       badgeColor: 'warning',
-      explanation: 'Bluetooth is turned off. Please turn on Bluetooth in quick settings or Android Settings.',
-      sourceLabel: 'Bluetooth',
+      explanation: 'Bluetooth is turned off. Values shown are simulated for demonstration.',
+      sourceLabel: 'Demo Data',
       isReal: false,
       isDemo: true,
     };
   }
 
-  // 5. Permission Required
+  // 6. Permission Required
   if (params.blePermissionRequired || (params.healthConnectAvailable && !params.healthConnectPermissionsGranted)) {
     return {
       state: 'PERMISSION_REQUIRED',
       displayStatus: 'Permission Required',
       badgeLabel: 'PERMISSION REQUIRED',
       badgeColor: 'warning',
-      explanation: 'Health or Bluetooth permissions are required to access wearable health data.',
-      sourceLabel: params.healthConnectAvailable ? 'Health Connect' : 'Bluetooth',
-      isReal: false,
-      isDemo: true,
-    };
-  }
-
-  // 6. Health Connect Unavailable
-  if (!params.healthConnectAvailable && params.healthConnectAvailable === false && !params.isBleConnected) {
-    // Only if explicitly checked on native platform and found unavailable
-    return {
-      state: 'NOT_CONNECTED',
-      displayStatus: 'Not Connected',
-      badgeLabel: 'NOT CONNECTED',
-      badgeColor: 'demo',
-      explanation: 'No wearable or Health Connect data is available. Values shown are simulated for demonstration.',
+      explanation: 'Health or Bluetooth permissions needed. Values shown are simulated for demonstration.',
       sourceLabel: 'Demo Data',
       isReal: false,
       isDemo: true,
@@ -545,8 +546,7 @@ export function normalizeVitalsDisplay(params: {
   const { status, health, metrics } = params;
 
   if (status.state === 'CONNECTED_REAL_DATA') {
-    // STATE 3: VALID CURRENT HEALTH DATA AVAILABLE
-    // Only use metrics actually obtained from the source; missing ones are "Not available"
+    // REAL VERIFIED HEALTH DATA
     const hrVal = typeof health.heart_rate === 'number' && health.heart_rate > 0 ? health.heart_rate : null;
     const spo2Val = typeof health.spo2 === 'number' && health.spo2 > 0 ? health.spo2 : null;
     const stepsVal = typeof health.steps === 'number' && health.steps >= 0 ? health.steps : null;
@@ -559,146 +559,77 @@ export function normalizeVitalsDisplay(params: {
     return {
       status,
       heartRate: {
-        value: hrVal,
-        displayValue: hrVal !== null ? String(hrVal) : '—',
-        unit: hrVal !== null ? 'BPM' : 'Not available',
-        statusLabel: hrVal !== null ? 'Real Data' : 'Not available',
+        value: hrVal ?? DEMO_VITALS_DATA.heartRate,
+        displayValue: hrVal !== null ? String(hrVal) : `${DEMO_VITALS_DATA.heartRate}`,
+        unit: 'BPM',
+        statusLabel: hrVal !== null ? 'Connected — Real Data' : 'Demo Data',
         isReal: hrVal !== null,
-        isDemo: false,
-        available: hrVal !== null,
-        source: sourceLabel,
+        isDemo: hrVal === null,
+        available: true,
+        source: hrVal !== null ? sourceLabel : 'Demo Data',
         timestamp: metrics?.heart_rate?.latestTimestamp || ts,
-        reasonUnavailable: hrVal !== null ? undefined : 'Heart rate record not provided by connected device',
       },
       spo2: {
-        value: spo2Val,
-        displayValue: spo2Val !== null ? String(spo2Val) : '—',
-        unit: spo2Val !== null ? '%' : 'Not available',
-        statusLabel: spo2Val !== null ? 'Real Data' : 'Not available',
+        value: spo2Val ?? DEMO_VITALS_DATA.spo2,
+        displayValue: spo2Val !== null ? String(spo2Val) : `${DEMO_VITALS_DATA.spo2}`,
+        unit: '%',
+        statusLabel: spo2Val !== null ? 'Connected — Real Data' : 'Demo Data',
         isReal: spo2Val !== null,
-        isDemo: false,
-        available: spo2Val !== null,
-        source: sourceLabel,
+        isDemo: spo2Val === null,
+        available: true,
+        source: spo2Val !== null ? sourceLabel : 'Demo Data',
         timestamp: metrics?.spo2?.latestTimestamp || ts,
-        reasonUnavailable: spo2Val !== null ? undefined : 'SpO2 record not provided by connected device',
       },
       steps: {
-        value: stepsVal,
-        displayValue: stepsVal !== null ? stepsVal.toLocaleString() : '—',
-        unit: stepsVal !== null ? 'steps' : 'Not available',
-        statusLabel: stepsVal !== null ? 'Real Data' : 'Not available',
+        value: stepsVal ?? DEMO_VITALS_DATA.steps,
+        displayValue: stepsVal !== null ? stepsVal.toLocaleString() : DEMO_VITALS_DATA.steps.toLocaleString(),
+        unit: 'steps',
+        statusLabel: stepsVal !== null ? 'Connected — Real Data' : 'Demo Data',
         isReal: stepsVal !== null,
-        isDemo: false,
-        available: stepsVal !== null,
-        source: sourceLabel,
+        isDemo: stepsVal === null,
+        available: true,
+        source: stepsVal !== null ? sourceLabel : 'Demo Data',
         timestamp: metrics?.steps?.latestTimestamp || ts,
-        reasonUnavailable: stepsVal !== null ? undefined : 'No step records found for today',
       },
       sleep: {
-        value: sleepVal,
-        displayValue: sleepVal !== null ? `${sleepVal}h` : '—',
-        unit: sleepVal !== null ? 'hours' : 'Not available',
-        statusLabel: sleepVal !== null ? 'Real Data' : 'Not available',
+        value: sleepVal ?? DEMO_VITALS_DATA.sleep,
+        displayValue: sleepVal !== null ? `${sleepVal}h` : `${DEMO_VITALS_DATA.sleep}h`,
+        unit: 'hours',
+        statusLabel: sleepVal !== null ? 'Connected — Real Data' : 'Demo Data',
         isReal: sleepVal !== null,
-        isDemo: false,
-        available: sleepVal !== null,
-        source: sourceLabel,
+        isDemo: sleepVal === null,
+        available: true,
+        source: sleepVal !== null ? sourceLabel : 'Demo Data',
         timestamp: metrics?.sleep?.latestTimestamp || ts,
-        reasonUnavailable: sleepVal !== null ? undefined : 'No sleep records found for last night',
       },
       temperature: {
-        value: tempVal,
-        displayValue: tempVal !== null ? `${tempVal}` : '—',
-        unit: tempVal !== null ? '°C' : 'Not available',
-        statusLabel: tempVal !== null ? 'Real Data' : 'Not available',
+        value: tempVal ?? DEMO_VITALS_DATA.temperature,
+        displayValue: tempVal !== null ? `${tempVal}` : `${DEMO_VITALS_DATA.temperature}`,
+        unit: '°C',
+        statusLabel: tempVal !== null ? 'Connected — Real Data' : 'Demo Data',
         isReal: tempVal !== null,
-        isDemo: false,
-        available: tempVal !== null,
-        source: sourceLabel,
+        isDemo: tempVal === null,
+        available: true,
+        source: tempVal !== null ? sourceLabel : 'Demo Data',
         timestamp: metrics?.temperature?.latestTimestamp || ts,
-        reasonUnavailable: tempVal !== null ? undefined : 'Body temperature not provided by connected device',
       },
     };
   }
 
-  if (status.state === 'CONNECTED_NO_DATA') {
-    // STATE 2: DEVICE CONNECTED BUT NO USABLE HEALTH RECORDS
-    // Check if an older historical reading exists
-    const hasOldHr = typeof health.heart_rate === 'number' && health.heart_rate > 0 && Boolean(health.timestamp);
-    const hasOldSteps = typeof health.steps === 'number' && health.steps > 0 && Boolean(health.timestamp);
+  // ALL OTHER STATES: Connected — No Data, Demo Data, Not Connected, Connection Error
+  // Every value is clearly marked as "Demo Data" with source "Demo Data".
+  // The dashboard NEVER becomes blank.
+  const hrVal = typeof health.heart_rate === 'number' && health.heart_rate > 0 ? health.heart_rate : DEMO_VITALS_DATA.heartRate;
+  const spo2Val = typeof health.spo2 === 'number' && health.spo2 > 0 ? health.spo2 : DEMO_VITALS_DATA.spo2;
+  const stepsVal = typeof health.steps === 'number' && health.steps >= 0 ? health.steps : DEMO_VITALS_DATA.steps;
+  const sleepVal = typeof health.sleep === 'number' && health.sleep >= 0 ? health.sleep : DEMO_VITALS_DATA.sleep;
+  const tempVal = typeof health.temperature === 'number' && health.temperature > 0 ? health.temperature : DEMO_VITALS_DATA.temperature;
 
-    return {
-      status,
-      heartRate: {
-        value: hasOldHr ? health.heart_rate! : null,
-        displayValue: hasOldHr ? String(health.heart_rate) : '—',
-        unit: hasOldHr ? 'BPM' : 'Not available',
-        statusLabel: hasOldHr ? 'Last recorded data' : 'Not available',
-        isReal: false,
-        isDemo: false,
-        available: hasOldHr,
-        source: hasOldHr ? 'Last recorded reading' : 'Connected — No Data',
-        timestamp: health.timestamp || null,
-        reasonUnavailable: 'Device connected, but no current heart rate record available.',
-      },
-      spo2: {
-        value: null,
-        displayValue: '—',
-        unit: 'Not available',
-        statusLabel: 'Not available',
-        isReal: false,
-        isDemo: false,
-        available: false,
-        source: 'Connected — No Data',
-        timestamp: null,
-        reasonUnavailable: 'Device connected, but no current SpO2 record available.',
-      },
-      steps: {
-        value: hasOldSteps ? health.steps! : null,
-        displayValue: hasOldSteps ? health.steps!.toLocaleString() : '—',
-        unit: hasOldSteps ? 'steps' : 'Not available',
-        statusLabel: hasOldSteps ? 'Last recorded data' : 'Not available',
-        isReal: false,
-        isDemo: false,
-        available: hasOldSteps,
-        source: hasOldSteps ? 'Last recorded reading' : 'Connected — No Data',
-        timestamp: health.timestamp || null,
-        reasonUnavailable: 'Device connected, but no step records available for today.',
-      },
-      sleep: {
-        value: null,
-        displayValue: '—',
-        unit: 'Not available',
-        statusLabel: 'Not available',
-        isReal: false,
-        isDemo: false,
-        available: false,
-        source: 'Connected — No Data',
-        timestamp: null,
-        reasonUnavailable: 'Device connected, but no sleep records available.',
-      },
-      temperature: {
-        value: null,
-        displayValue: '—',
-        unit: 'Not available',
-        statusLabel: 'Not available',
-        isReal: false,
-        isDemo: false,
-        available: false,
-        source: 'Connected — No Data',
-        timestamp: null,
-        reasonUnavailable: 'Device connected, but no temperature records available.',
-      },
-    };
-  }
-
-  // STATE 1: NO DEVICE / NO HEALTH CONNECT DATA (or demo / permission required / bt off)
-  // All vitals clearly and unmistakable labeled "Demo Data"
   return {
     status,
     heartRate: {
-      value: DEMO_VITALS_DATA.heartRate,
-      displayValue: `${DEMO_VITALS_DATA.heartRate}`,
+      value: hrVal,
+      displayValue: `${hrVal}`,
       unit: 'BPM',
       statusLabel: 'Demo Data',
       isReal: false,
@@ -708,8 +639,8 @@ export function normalizeVitalsDisplay(params: {
       timestamp: null,
     },
     spo2: {
-      value: DEMO_VITALS_DATA.spo2,
-      displayValue: `${DEMO_VITALS_DATA.spo2}`,
+      value: spo2Val,
+      displayValue: `${spo2Val}`,
       unit: '%',
       statusLabel: 'Demo Data',
       isReal: false,
@@ -719,8 +650,8 @@ export function normalizeVitalsDisplay(params: {
       timestamp: null,
     },
     steps: {
-      value: DEMO_VITALS_DATA.steps,
-      displayValue: DEMO_VITALS_DATA.steps.toLocaleString(),
+      value: stepsVal,
+      displayValue: stepsVal.toLocaleString(),
       unit: 'steps',
       statusLabel: 'Demo Data',
       isReal: false,
@@ -730,8 +661,8 @@ export function normalizeVitalsDisplay(params: {
       timestamp: null,
     },
     sleep: {
-      value: DEMO_VITALS_DATA.sleep,
-      displayValue: `${DEMO_VITALS_DATA.sleep}`,
+      value: sleepVal,
+      displayValue: `${sleepVal}h`,
       unit: 'hours',
       statusLabel: 'Demo Data',
       isReal: false,
@@ -741,8 +672,8 @@ export function normalizeVitalsDisplay(params: {
       timestamp: null,
     },
     temperature: {
-      value: DEMO_VITALS_DATA.temperature,
-      displayValue: `${DEMO_VITALS_DATA.temperature}`,
+      value: tempVal,
+      displayValue: `${tempVal}`,
       unit: '°C',
       statusLabel: 'Demo Data',
       isReal: false,

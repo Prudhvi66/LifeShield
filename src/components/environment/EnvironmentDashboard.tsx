@@ -262,11 +262,11 @@ export const EnvironmentDashboard: React.FC = () => {
       )}
 
 
-      {/* Demo Warning Notice */}
+      {/* Simulation Notice */}
       <div className="p-3 bg-purple-950/40 border border-purple-500/30 rounded-2xl text-xs text-purple-300 flex items-center gap-2">
         <Info className="w-4 h-4 text-purple-400 shrink-0" />
         <span>
-          <strong>Hackathon Notice:</strong> Disaster feeds and weather indices include simulated emergency scenarios labeled for demonstration purposes.
+          <strong>Simulation Notice:</strong> Environmental monitoring includes simulated advisory scenarios for testing purposes.
         </span>
       </div>
 

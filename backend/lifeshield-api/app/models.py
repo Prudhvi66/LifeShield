@@ -48,6 +48,7 @@ class User(Base):
     sos_events: Mapped[list["SOSEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     voice_preferences: Mapped["VoicePreference"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
     dispatch_preferences: Mapped["EmergencyDispatchPreference"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    hydration_logs: Mapped[list["HydrationLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class UserBaseline(Base):
@@ -109,6 +110,19 @@ class HealthReading(Base):
     raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="health_readings")
+
+
+class HydrationLog(Base):
+    __tablename__ = "hydration_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True)
+    amount_ml: Mapped[int] = mapped_column(Integer, default=250)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    source: Mapped[str] = mapped_column(String, default="manual")
+    sync_status: Mapped[str] = mapped_column(String, default="synced")
+
+    user: Mapped["User"] = relationship(back_populates="hydration_logs")
 
 
 class Reminder(Base):
